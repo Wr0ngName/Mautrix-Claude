@@ -6,7 +6,7 @@ variables:
   REGISTRY: dev.wn:5000
   IMAGE_NAME: mautrix-candy
   GO_VERSION: "1.23"
-
+  
 build:
   stage: build
   tags:
