@@ -1,0 +1,36 @@
+FROM golang:1.23-alpine AS builder
+
+RUN apk add --no-cache git ca-certificates build-base sqlite-dev
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG COMMIT_HASH
+ARG BUILD_TIME
+ARG VERSION=0.1.0
+
+RUN CGO_ENABLED=1 go build -tags "goolm" -o /usr/bin/mautrix-candy \
+    -ldflags "-s -w \
+        -X main.Tag=${VERSION} \
+        -X main.Commit=${COMMIT_HASH:-$(git rev-parse HEAD 2>/dev/null || echo unknown)} \
+        -X 'main.BuildTime=${BUILD_TIME:-$(date -Iseconds)}'" \
+    ./cmd/mautrix-candy
+
+FROM alpine:3.20
+
+ENV UID=1337 \
+    GID=1337
+
+RUN apk add --no-cache su-exec ca-certificates bash jq yq curl sqlite-libs
+
+COPY --from=builder /usr/bin/mautrix-candy /usr/bin/mautrix-candy
+COPY docker-run.sh /docker-run.sh
+RUN chmod +x /docker-run.sh
+
+VOLUME /data
+WORKDIR /data
+
+CMD ["/docker-run.sh"]
