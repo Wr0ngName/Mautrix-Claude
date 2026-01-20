@@ -9,6 +9,8 @@ variables:
 
 build:
   stage: build
+  tags:
+    - shell
   script:
     - go version
     - go mod download
@@ -26,6 +28,8 @@ build:
 
 docker:
   stage: docker
+  tags:
+    - shell
   needs:
     - build
   script:
