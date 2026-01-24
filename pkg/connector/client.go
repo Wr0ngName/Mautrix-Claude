@@ -3,6 +3,8 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -13,338 +15,402 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
 
-	"go.mau.fi/mautrix-candy/pkg/candygo"
+	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
 
-// CandyClient implements the bridgev2.NetworkAPI interface for a candy.ai user.
-type CandyClient struct {
-	*candygo.Client
-	UserLogin *bridgev2.UserLogin
-	Connector *CandyConnector
+// ClaudeClient represents a client connection to Claude API.
+type ClaudeClient struct {
+	Client        *claudeapi.Client
+	UserLogin     *bridgev2.UserLogin
+	Connector     *ClaudeConnector
+	conversations map[networkid.PortalID]*claudeapi.ConversationManager
+	convMu        sync.RWMutex
 
-	// Track subscribed conversations
-	subscribedConversations map[int64]bool
+	// Graceful shutdown support
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-var _ bridgev2.NetworkAPI = (*CandyClient)(nil)
+var _ bridgev2.NetworkAPI = (*ClaudeClient)(nil)
 
-// Connect establishes the connection to candy.ai.
-func (c *CandyClient) Connect(ctx context.Context) {
-	c.Connector.Log.Debug().Msg("Connecting to candy.ai")
+// Connect is called when the client should connect.
+func (c *ClaudeClient) Connect(ctx context.Context) {
+	// Create a cancellable context for this client's goroutines
+	c.ctx, c.cancel = context.WithCancel(context.Background())
 
-	if err := c.Client.Connect(ctx); err != nil {
-		c.Connector.Log.Error().Err(err).Msg("Failed to connect to candy.ai")
-		c.UserLogin.BridgeState.Send(status.BridgeState{
-			StateEvent: status.StateBadCredentials,
-			Error:      "candy-connect-failed",
-			Message:    err.Error(),
-		})
-		return
+	// Start conversation cleanup goroutine if max age is configured
+	if c.Connector.Config.ConversationMaxAge > 0 {
+		c.wg.Add(1)
+		go c.conversationCleanupLoop()
 	}
 
-	// Set up event handler
-	c.Client.SetEventHandler(c.handleCandyEvent)
-
+	c.Connector.Log.Info().Msg("Claude client ready")
 	c.UserLogin.BridgeState.Send(status.BridgeState{
 		StateEvent: status.StateConnected,
 	})
+}
 
-	// Sync conversations if enabled
-	if c.Connector.Config.SyncOnConnect {
-		go c.syncConversations(context.Background())
+// Disconnect is called when the client should disconnect.
+func (c *ClaudeClient) Disconnect() {
+	// Cancel context to stop all goroutines
+	if c.cancel != nil {
+		c.cancel()
+	}
+
+	// Wait for all goroutines to finish
+	c.wg.Wait()
+
+	c.Connector.Log.Info().Msg("Claude client disconnected")
+}
+
+// conversationCleanupLoop periodically cleans up expired conversations.
+func (c *ClaudeClient) conversationCleanupLoop() {
+	defer c.wg.Done()
+
+	maxAge := time.Duration(c.Connector.Config.ConversationMaxAge) * time.Hour
+	ticker := time.NewTicker(10 * time.Minute) // Check every 10 minutes
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			c.cleanupExpiredConversations(maxAge)
+		}
 	}
 }
 
-// Disconnect disconnects from candy.ai.
-func (c *CandyClient) Disconnect() {
-	c.Connector.Log.Debug().Msg("Disconnecting from candy.ai")
-	c.Client.Disconnect()
+// cleanupExpiredConversations removes conversations that have exceeded the max age.
+func (c *ClaudeClient) cleanupExpiredConversations(maxAge time.Duration) {
+	c.convMu.Lock()
+	defer c.convMu.Unlock()
+
+	expired := make([]networkid.PortalID, 0)
+
+	for portalID, cm := range c.conversations {
+		if cm.IsExpired(maxAge) {
+			expired = append(expired, portalID)
+		}
+	}
+
+	for _, portalID := range expired {
+		delete(c.conversations, portalID)
+		c.Connector.Log.Debug().
+			Str("portal_id", string(portalID)).
+			Msg("Cleaned up expired conversation")
+	}
+
+	if len(expired) > 0 {
+		c.Connector.Log.Info().
+			Int("count", len(expired)).
+			Msg("Cleaned up expired conversations")
+	}
 }
 
-// IsLoggedIn returns whether the client is logged in.
-func (c *CandyClient) IsLoggedIn() bool {
-	return c.Client.IsLoggedIn()
+// IsLoggedIn checks if the client is logged in.
+func (c *ClaudeClient) IsLoggedIn() bool {
+	return c.Client != nil && c.Client.APIKey != ""
 }
 
 // LogoutRemote logs out from the remote service.
-func (c *CandyClient) LogoutRemote(ctx context.Context) {
-	c.Client.Logout(ctx)
+func (c *ClaudeClient) LogoutRemote(ctx context.Context) {
+	// API keys don't need remote logout
 }
 
-// IsThisUser checks if the given user ID belongs to this user.
-func (c *CandyClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {
-	session := c.Client.GetSession()
-	if session == nil {
-		return false
+// IsThisUser checks if a user ID belongs to this logged-in user.
+func (c *ClaudeClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {
+	// All Claude ghosts belong to the system, not individual users
+	return false
+}
+
+// getConversationManager gets or creates a conversation manager for a portal.
+func (c *ClaudeClient) getConversationManager(portal *bridgev2.Portal) *claudeapi.ConversationManager {
+	c.convMu.Lock()
+	defer c.convMu.Unlock()
+
+	portalID := portal.PortalKey.ID
+
+	if cm, ok := c.conversations[portalID]; ok {
+		return cm
 	}
-	return string(userID) == fmt.Sprintf("%d", session.UserID)
+
+	// Create new conversation manager with max tokens from config
+	maxTokens := claudeapi.GetModelMaxTokens(c.Connector.Config.GetDefaultModel())
+	cm := claudeapi.NewConversationManager(maxTokens)
+	c.conversations[portalID] = cm
+
+	return cm
 }
 
-// GetChatInfo returns information about a chat.
-func (c *CandyClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	meta := portal.Metadata.(*PortalMetadata)
+// HandleMatrixMessage handles a message sent from Matrix to Claude.
+func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	meta := msg.Portal.Metadata.(*PortalMetadata)
 
-	// Load conversation data
-	data, err := c.Client.LoadConversationPage(ctx, meta.ProfileSlug)
+	// Get or create conversation manager for this portal
+	convMgr := c.getConversationManager(msg.Portal)
+
+	// Add user message to history
+	convMgr.AddMessage("user", msg.Content.Body)
+
+	// Prepare API request
+	model := meta.Model
+	if model == "" {
+		model = c.Connector.Config.GetDefaultModel()
+	}
+
+	temperature := meta.GetTemperature(c.Connector.Config.GetTemperature())
+
+	systemPrompt := meta.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = c.Connector.Config.GetSystemPrompt()
+	}
+
+	req := &claudeapi.CreateMessageRequest{
+		Model:       model,
+		Messages:    convMgr.GetMessages(),
+		MaxTokens:   c.Connector.Config.GetMaxTokens(),
+		Temperature: temperature,
+		System:      systemPrompt,
+		Stream:      true, // Use streaming for better UX
+	}
+
+	// Send to Claude API
+	stream, err := c.Client.CreateMessageStream(ctx, req)
 	if err != nil {
-		return nil, err
+		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")
+		return nil, c.formatUserFriendlyError(err)
 	}
 
-	roomType := database.RoomTypeDM
-	members := &bridgev2.ChatMemberList{
-		IsFull: true,
-		Members: []bridgev2.ChatMember{
-			{
-				EventSender: bridgev2.EventSender{
-					IsFromMe: false,
-					Sender:   MakeCandyUserID(meta.ProfileID),
-				},
-			},
-		},
-	}
+	// Collect response
+	var responseText strings.Builder
+	var claudeMessageID string
+	var inputTokens, outputTokens int
 
-	return &bridgev2.ChatInfo{
-		Name:    &meta.ProfileName,
-		Members: members,
-		Type:    &roomType,
-		ExtraUpdates: func(ctx context.Context, p *bridgev2.Portal) bool {
-			pm := p.Metadata.(*PortalMetadata)
-			pm.ConversationID = data.ConversationID
-			pm.ProfileID = data.ProfileID
-			if data.Profile != nil {
-				pm.ProfileName = data.Profile.Name
+	for event := range stream {
+		switch event.Type {
+		case "message_start":
+			if event.Message != nil {
+				claudeMessageID = event.Message.ID
+				if event.Message.Usage != nil && event.Message.Usage.InputTokens > 0 {
+					inputTokens = event.Message.Usage.InputTokens
+				}
 			}
-			return true
+		case "content_block_delta":
+			if event.Delta != nil && event.Delta.Text != "" {
+				responseText.WriteString(event.Delta.Text)
+			}
+		case "message_delta":
+			if event.Usage != nil {
+				outputTokens = event.Usage.OutputTokens
+			}
+		case "error":
+			c.Connector.Log.Error().Interface("event", event).Msg("Error in stream")
+		}
+	}
+
+	if claudeMessageID == "" {
+		claudeMessageID = fmt.Sprintf("msg_%d", time.Now().UnixNano())
+	}
+
+	// Add assistant response to conversation history
+	responseContent := responseText.String()
+	if responseContent == "" {
+		return nil, fmt.Errorf("received empty response from Claude")
+	}
+
+	convMgr.AddMessage("assistant", responseContent)
+
+	// Trim conversation if needed
+	if err := convMgr.TrimToTokenLimit(); err != nil {
+		c.Connector.Log.Warn().Err(err).Msg("Failed to trim conversation")
+	}
+
+	// Queue the assistant's response as an incoming message
+	// Use a context-aware goroutine with WaitGroup for graceful shutdown
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+
+		select {
+		case <-c.ctx.Done():
+			c.Connector.Log.Debug().Msg("Skipping assistant response queue due to shutdown")
+			return
+		default:
+			c.queueAssistantResponse(msg.Portal, responseContent, claudeMessageID, inputTokens+outputTokens)
+		}
+	}()
+
+	// Return response metadata
+	return &bridgev2.MatrixMessageResponse{
+		DB: &database.Message{
+			ID:        MakeClaudeMessageID(claudeMessageID),
+			Timestamp: time.Now(),
+			Metadata: &MessageMetadata{
+				ClaudeMessageID: claudeMessageID,
+				TokensUsed:      inputTokens + outputTokens,
+			},
 		},
 	}, nil
 }
 
-// GetUserInfo returns information about a user.
-func (c *CandyClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
-	meta := ghost.Metadata.(*GhostMetadata)
-
-	// Load profile info
-	data, err := c.Client.LoadConversationPage(ctx, meta.ProfileSlug)
-	if err != nil {
-		return nil, err
+// formatUserFriendlyError converts API errors to user-friendly messages.
+func (c *ClaudeClient) formatUserFriendlyError(err error) error {
+	if err == nil {
+		return nil
 	}
 
-	isBot := true
-	info := &bridgev2.UserInfo{
-		IsBot: &isBot,
+	// Check for specific error types
+	if claudeapi.IsRateLimitError(err) {
+		retryAfter := claudeapi.GetRetryAfter(err)
+		if retryAfter > 0 {
+			return fmt.Errorf("rate limit exceeded. Please wait %s and try again", retryAfter.Round(time.Second))
+		}
+		return fmt.Errorf("rate limit exceeded. Please wait a moment and try again")
 	}
 
-	if data.Profile != nil {
-		info.Name = &data.Profile.Name
+	if claudeapi.IsAuthError(err) {
+		return fmt.Errorf("authentication failed. Please check your API key is valid and has sufficient permissions")
 	}
 
-	return info, nil
+	if claudeapi.IsOverloadedError(err) {
+		return fmt.Errorf("Claude is currently overloaded. Please try again in a few moments")
+	}
+
+	if claudeapi.IsInvalidRequestError(err) {
+		return fmt.Errorf("invalid request: %v", err)
+	}
+
+	// Generic error
+	return fmt.Errorf("failed to send message to Claude: %w", err)
 }
 
-// GetCapabilities returns the capabilities for a portal.
-func (c *CandyClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *bridgev2.NetworkRoomCapabilities {
+// queueAssistantResponse sends the assistant's message to the Matrix room.
+func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, messageID string, tokensUsed int) {
+	meta := portal.Metadata.(*PortalMetadata)
+	model := meta.Model
+	if model == "" {
+		model = c.Connector.Config.GetDefaultModel()
+	}
+
+	ghostID := MakeClaudeGhostID(model)
+
+	c.UserLogin.QueueRemoteEvent(&simplevent.Message[*MessageMetadata]{
+		EventMeta: simplevent.EventMeta{
+			Type: bridgev2.RemoteEventMessage,
+			LogContext: func(c zerolog.Context) zerolog.Context {
+				return c.Str("claude_message_id", messageID)
+			},
+			PortalKey: portal.PortalKey,
+			Sender:    bridgev2.EventSender{Sender: ghostID},
+			Timestamp: time.Now(),
+		},
+		ID: MakeClaudeMessageID(messageID),
+		Data: &MessageMetadata{
+			ClaudeMessageID: messageID,
+			TokensUsed:      tokensUsed,
+		},
+		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
+			return &bridgev2.ConvertedMessage{
+				Parts: []*bridgev2.ConvertedMessagePart{
+					{
+						ID:   networkid.PartID(messageID),
+						Type: event.EventMessage,
+						Content: &event.MessageEventContent{
+							MsgType: event.MsgText,
+							Body:    text,
+						},
+					},
+				},
+			}, nil
+		},
+	})
+}
+
+// GetCapabilities returns the capabilities for a specific portal.
+func (c *ClaudeClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *bridgev2.NetworkRoomCapabilities {
 	return &bridgev2.NetworkRoomCapabilities{
 		FormattedText:    true,
 		UserMentions:     false,
 		RoomMentions:     false,
 		LocationMessages: false,
 		Captions:         false,
-		MaxTextLength:    10000,
+		MaxTextLength:    100000, // Claude has large context window
 		Edits:            false,
-		EditMaxCount:     0,
-		EditMaxAge:       0,
 		Deletes:          false,
-		DeleteMaxAge:     0,
 		Reactions:        false,
-		ReactionCount:    0,
-		Replies:          false,
-		Threads:          false,
+		Replies:          true, // Could implement as conversation context
 		ReadReceipts:     false,
 	}
 }
 
-// HandleMatrixMessage handles a message from Matrix.
-func (c *CandyClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (message *bridgev2.MatrixMessageResponse, err error) {
-	meta := msg.Portal.Metadata.(*PortalMetadata)
-
-	// Send message to candy.ai
-	req := &candygo.SendMessageRequest{
-		ProfileID: meta.ProfileID,
-		Body:      msg.Content.Body,
-	}
-
-	candyMsg, err := c.Client.SendMessage(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
-	}
-
-	resp := &bridgev2.MatrixMessageResponse{
-		DB: &database.Message{
-			Timestamp: time.Now(),
-		},
-	}
-
-	if candyMsg != nil {
-		resp.DB.ID = MakeCandyMessageID(candyMsg.ID)
-		resp.DB.Metadata = &MessageMetadata{CandyMessageID: candyMsg.ID}
-	}
-
-	return resp, nil
+// HandleMatrixEdit handles an edit to a Matrix message (not supported).
+func (c *ClaudeClient) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit) error {
+	return fmt.Errorf("message editing is not supported")
 }
 
-// syncConversations syncs all conversations from candy.ai.
-func (c *CandyClient) syncConversations(ctx context.Context) {
-	c.Connector.Log.Debug().Msg("Syncing conversations")
+// HandleMatrixMessageRemove handles a deletion of a Matrix message (not supported).
+func (c *ClaudeClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.MatrixMessageRemove) error {
+	return fmt.Errorf("message deletion is not supported")
+}
 
-	conversations, err := c.Client.GetConversations(ctx)
-	if err != nil {
-		c.Connector.Log.Error().Err(err).Msg("Failed to get conversations")
-		return
+// HandleMatrixReaction handles a reaction to a Matrix message (not supported).
+func (c *ClaudeClient) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) error {
+	return fmt.Errorf("reactions are not supported")
+}
+
+// HandleMatrixReactionRemove handles removal of a reaction (not supported).
+func (c *ClaudeClient) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
+	return fmt.Errorf("reactions are not supported")
+}
+
+// HandleMatrixReadReceipt handles a read receipt (not supported).
+func (c *ClaudeClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2.MatrixReadReceipt) error {
+	// Silently ignore read receipts
+	return nil
+}
+
+// HandleMatrixTyping handles a typing notification (not supported).
+func (c *ClaudeClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.MatrixTyping) error {
+	// Silently ignore typing notifications
+	return nil
+}
+
+// PreHandleMatrixMessage is called before handling a Matrix message.
+func (c *ClaudeClient) PreHandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (bridgev2.MatrixMessageResponse, error) {
+	// No pre-processing needed
+	return bridgev2.MatrixMessageResponse{}, nil
+}
+
+// GetMetrics returns the API client metrics.
+func (c *ClaudeClient) GetMetrics() *claudeapi.Metrics {
+	if c.Client == nil {
+		return nil
 	}
+	return c.Client.GetMetrics()
+}
 
-	for _, conv := range conversations {
+// ClearConversation clears the conversation history for a portal.
+func (c *ClaudeClient) ClearConversation(portalID networkid.PortalID) {
+	c.convMu.Lock()
+	defer c.convMu.Unlock()
+
+	if cm, ok := c.conversations[portalID]; ok {
+		cm.Clear()
 		c.Connector.Log.Debug().
-			Int64("id", conv.ID).
-			Str("profile", conv.ProfileSlug).
-			Msg("Found conversation")
-
-		// Ensure portal exists
-		portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, MakeCandyPortalKey(conv.ID))
-		if err != nil {
-			c.Connector.Log.Error().Err(err).Msg("Failed to get portal")
-			continue
-		}
-
-		if portal == nil {
-			c.Connector.Log.Debug().Int64("conversation_id", conv.ID).Msg("Creating portal")
-		}
-
-		// Subscribe to conversation updates
-		if c.subscribedConversations == nil {
-			c.subscribedConversations = make(map[int64]bool)
-		}
-
-		if !c.subscribedConversations[conv.ID] {
-			if err := c.Client.SubscribeToConversation(ctx, conv.ID); err != nil {
-				c.Connector.Log.Warn().Err(err).Int64("conversation_id", conv.ID).Msg("Failed to subscribe")
-			} else {
-				c.subscribedConversations[conv.ID] = true
-			}
-		}
+			Str("portal_id", string(portalID)).
+			Msg("Cleared conversation history")
 	}
 }
 
-// handleCandyEvent handles events from the candy.ai client.
-func (c *CandyClient) handleCandyEvent(evt candygo.Event) {
-	switch e := evt.(type) {
-	case *candygo.MessageEvent:
-		c.handleMessageEvent(e)
-	case *candygo.ConversationUpdateEvent:
-		c.handleConversationUpdateEvent(e)
-	case *candygo.ConnectionStateEvent:
-		c.handleConnectionStateEvent(e)
+// GetConversationStats returns stats for a portal's conversation.
+func (c *ClaudeClient) GetConversationStats(portalID networkid.PortalID) (messageCount, estimatedTokens int, lastUsed time.Time) {
+	c.convMu.RLock()
+	defer c.convMu.RUnlock()
+
+	if cm, ok := c.conversations[portalID]; ok {
+		return cm.MessageCount(), cm.EstimatedTokens(), cm.LastUsedAt()
 	}
-}
-
-// handleMessageEvent handles incoming messages from candy.ai.
-func (c *CandyClient) handleMessageEvent(evt *candygo.MessageEvent) {
-	if evt.Message == nil {
-		return
-	}
-
-	msg := evt.Message
-	c.Connector.Log.Debug().
-		Int64("id", msg.ID).
-		Bool("from_user", msg.IsFromUser).
-		Str("body", truncateStr(msg.Body, 50)).
-		Msg("Received message from candy.ai")
-
-	// Skip messages from the user (we sent them)
-	if msg.IsFromUser {
-		return
-	}
-
-	// Find the portal for this conversation
-	if evt.Conversation == nil {
-		c.Connector.Log.Warn().Msg("Message event without conversation info")
-		return
-	}
-
-	portalKey := MakeCandyPortalKey(evt.Conversation.ID)
-
-	// Get the portal metadata to find sender info
-	portal, err := c.UserLogin.Bridge.GetPortalByKey(context.Background(), portalKey)
-	if err != nil || portal == nil {
-		c.Connector.Log.Warn().Err(err).Msg("Portal not found for message")
-		return
-	}
-
-	meta := portal.Metadata.(*PortalMetadata)
-
-	// Create the Matrix event
-	wrapped := &simplevent.Message[*MessageMetadata]{
-		EventMeta: simplevent.EventMeta{
-			Type: bridgev2.RemoteEventMessage,
-			LogContext: func(c zerolog.Context) zerolog.Context {
-				return c.Int64("candy_msg_id", msg.ID)
-			},
-			PortalKey:    portalKey,
-			CreatePortal: true,
-			Sender: bridgev2.EventSender{
-				IsFromMe: false,
-				Sender:   MakeCandyUserID(meta.ProfileID),
-			},
-			Timestamp: msg.Timestamp,
-		},
-		ID: MakeCandyMessageID(msg.ID),
-		Data: &MessageMetadata{
-			CandyMessageID: msg.ID,
-		},
-		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
-			return &bridgev2.ConvertedMessage{
-				Parts: []*bridgev2.ConvertedMessagePart{
-					{
-						Type: event.EventMessage,
-						Content: &event.MessageEventContent{
-							MsgType: event.MsgText,
-							Body:    msg.Body,
-						},
-					},
-				},
-			}, nil
-		},
-	}
-
-	c.UserLogin.Bridge.QueueRemoteEvent(c.UserLogin, wrapped)
-}
-
-// handleConversationUpdateEvent handles conversation update events.
-func (c *CandyClient) handleConversationUpdateEvent(evt *candygo.ConversationUpdateEvent) {
-	c.Connector.Log.Debug().
-		Int64("conversation_id", evt.Conversation.ID).
-		Str("last_message", truncateStr(evt.Conversation.LastMessage, 50)).
-		Msg("Conversation updated")
-}
-
-// handleConnectionStateEvent handles connection state changes.
-func (c *CandyClient) handleConnectionStateEvent(evt *candygo.ConnectionStateEvent) {
-	if evt.Connected {
-		c.Connector.Log.Info().Msg("WebSocket connected")
-		c.UserLogin.BridgeState.Send(status.BridgeState{
-			StateEvent: status.StateConnected,
-		})
-	} else {
-		c.Connector.Log.Warn().Err(evt.Error).Msg("WebSocket disconnected")
-		c.UserLogin.BridgeState.Send(status.BridgeState{
-			StateEvent: status.StateTransientDisconnect,
-			Error:      "candy-websocket-disconnected",
-		})
-	}
-}
-
-func truncateStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+	return 0, 0, time.Time{}
 }

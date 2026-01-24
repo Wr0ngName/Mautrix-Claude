@@ -1,8 +1,8 @@
-// mautrix-candy is a Matrix-Candy.ai puppeting bridge.
+// mautrix-claude is a Matrix-Claude API puppeting bridge.
 package main
 
 import (
-	"go.mau.fi/mautrix-candy/pkg/connector"
+	"go.mau.fi/mautrix-claude/pkg/connector"
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 )
 
@@ -16,9 +16,9 @@ var (
 
 func main() {
 	m := mxmain.BridgeMain{
-		Name:        "mautrix-candy",
-		URL:         "https://github.com/mautrix/candy",
-		Description: "A Matrix-Candy.ai puppeting bridge",
+		Name:        "mautrix-claude",
+		URL:         "https://github.com/mautrix/claude",
+		Description: "A Matrix-Claude API bridge",
 		Version:     "0.1.0",
 		Connector:   connector.NewConnector(),
 	}

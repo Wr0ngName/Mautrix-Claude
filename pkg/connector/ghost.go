@@ -4,44 +4,28 @@ import (
 	"context"
 	"fmt"
 
-	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/networkid"
+
+	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
 
-// GetGhostInfo implements getting information about a ghost user (AI character).
-func (c *CandyClient) GetGhostInfo(ctx context.Context, userID networkid.UserID) (*bridgev2.UserInfo, error) {
-	profileID, err := ParseCandyUserID(userID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid user ID: %w", err)
+// GetUserInfo returns information about a ghost user (Claude model).
+func (c *ClaudeClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+	meta := ghost.Metadata.(*GhostMetadata)
+
+	modelName := meta.Model
+	displayName := fmt.Sprintf("Claude (%s)", modelName)
+
+	// Get model info for better display name
+	if info := claudeapi.GetModelInfo(modelName); info != nil {
+		displayName = info.Name
 	}
 
-	// Try to find this profile in our known conversations
-	conversations, err := c.Client.GetConversations(ctx)
-	if err != nil {
-		return nil, err
-	}
+	isBot := true
 
-	for _, conv := range conversations {
-		if conv.ProfileID == profileID {
-			return &bridgev2.UserInfo{
-				Name:        &conv.ProfileName,
-				IsBot:       ptr.Ptr(true),
-				Identifiers: []string{fmt.Sprintf("candy:%d", profileID)},
-			}, nil
-		}
-	}
-
-	// Not found in conversations, return minimal info
 	return &bridgev2.UserInfo{
-		IsBot: ptr.Ptr(true),
+		Name:        &displayName,
+		IsBot:       &isBot,
+		Identifiers: []string{fmt.Sprintf("claude:%s", modelName)},
 	}, nil
-}
-
-// CreateGhostMetadata creates metadata for a new ghost user.
-func CreateGhostMetadata(profileID int64, profileSlug string) *GhostMetadata {
-	return &GhostMetadata{
-		ProfileID:   profileID,
-		ProfileSlug: profileSlug,
-	}
 }

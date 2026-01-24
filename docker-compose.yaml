@@ -1,9 +1,9 @@
 version: "3.8"
 
 services:
-  mautrix-candy:
-    container_name: mautrix-candy
-    image: mautrix-candy:latest
+  mautrix-claude:
+    container_name: mautrix-claude
+    image: mautrix-claude:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -20,7 +20,7 @@ services:
   # Uncomment and configure if you need a database
   # For SQLite (default), no database container is needed
   # postgres:
-  #   container_name: mautrix-candy-postgres
+  #   container_name: mautrix-claude-postgres
   #   image: postgres:16-alpine
   #   restart: unless-stopped
   #   volumes:
@@ -28,7 +28,7 @@ services:
   #   environment:
   #     POSTGRES_USER: mautrix
   #     POSTGRES_PASSWORD: changeme
-  #     POSTGRES_DB: mautrix_candy
+  #     POSTGRES_DB: mautrix_claude
 
 # volumes:
 #   postgres_data:
