@@ -531,6 +531,12 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	convMgr.AddMessageWithContent("user", messageContent, userMsgID)
 	convMgr.AddMessageWithID("assistant", responseContent, claudeMessageID)
 
+	c.Connector.Log.Debug().
+		Str("portal_id", string(msg.Portal.PortalKey.ID)).
+		Int("message_count", convMgr.MessageCount()).
+		Int("estimated_tokens", convMgr.EstimatedTokens()).
+		Msg("Added messages to conversation history")
+
 	// Trim conversation if needed
 	if err := convMgr.TrimToTokenLimit(); err != nil {
 		c.Connector.Log.Warn().Err(err).Msg("Failed to trim conversation")
@@ -834,9 +840,30 @@ func (c *ClaudeClient) GetConversationStats(portalID networkid.PortalID) (messag
 	c.convMu.RLock()
 	defer c.convMu.RUnlock()
 
+	c.Connector.Log.Debug().
+		Str("portal_id", string(portalID)).
+		Int("total_conversations", len(c.conversations)).
+		Msg("Getting conversation stats")
+
 	if cm, ok := c.conversations[portalID]; ok {
-		return cm.MessageCount(), cm.EstimatedTokens(), cm.LastUsedAt()
+		count := cm.MessageCount()
+		tokens := cm.EstimatedTokens()
+		c.Connector.Log.Debug().
+			Int("message_count", count).
+			Int("estimated_tokens", tokens).
+			Msg("Found conversation")
+		return count, tokens, cm.LastUsedAt()
 	}
+
+	// Log available portal IDs for debugging
+	var ids []string
+	for id := range c.conversations {
+		ids = append(ids, string(id))
+	}
+	c.Connector.Log.Debug().
+		Strs("available_portals", ids).
+		Msg("Conversation not found for portal")
+
 	return 0, 0, time.Time{}
 }
 
