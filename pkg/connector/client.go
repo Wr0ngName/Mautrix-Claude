@@ -150,10 +150,17 @@ func (c *ClaudeClient) getConversationManager(portal *bridgev2.Portal) *claudeap
 
 // HandleMatrixMessage handles a message sent from Matrix to Claude.
 func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
-	meta, ok := msg.Portal.Metadata.(*PortalMetadata)
-	if !ok || meta == nil {
-		return nil, fmt.Errorf("invalid portal metadata")
+	// Get portal metadata, use defaults if not available
+	meta, _ := msg.Portal.Metadata.(*PortalMetadata)
+	if meta == nil {
+		meta = &PortalMetadata{} // Use empty metadata with defaults
 	}
+
+	c.Connector.Log.Debug().
+		Str("portal_id", string(msg.Portal.PortalKey.ID)).
+		Str("sender", string(msg.Event.Sender)).
+		Str("body", msg.Content.Body[:min(50, len(msg.Content.Body))]).
+		Msg("Handling Matrix message")
 
 	// Get or create conversation manager for this portal
 	convMgr := c.getConversationManager(msg.Portal)
@@ -162,7 +169,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	userMsgID := string(msg.Event.ID)
 	convMgr.AddMessageWithID("user", msg.Content.Body, userMsgID)
 
-	// Prepare API request
+	// Prepare API request - use portal-specific or connector defaults
 	model := meta.Model
 	if model == "" {
 		model = c.Connector.Config.GetDefaultModel()

@@ -10,9 +10,10 @@ import (
 
 // GetChatInfo returns information about a chat.
 func (c *ClaudeClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	meta, ok := portal.Metadata.(*PortalMetadata)
-	if !ok || meta == nil {
-		return nil, fmt.Errorf("invalid portal metadata")
+	// Get portal metadata, use defaults if not available
+	meta, _ := portal.Metadata.(*PortalMetadata)
+	if meta == nil {
+		meta = &PortalMetadata{}
 	}
 
 	roomType := database.RoomTypeDM
