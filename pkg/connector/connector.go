@@ -116,7 +116,10 @@ func (c *ClaudeConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 
 // LoadUserLogin loads an existing user login.
 func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
-	metadata := login.Metadata.(*UserLoginMetadata)
+	metadata, ok := login.Metadata.(*UserLoginMetadata)
+	if !ok || metadata == nil {
+		return fmt.Errorf("invalid user login metadata")
+	}
 
 	if metadata.APIKey == "" {
 		return fmt.Errorf("no stored API key")
@@ -156,11 +159,16 @@ type PortalMetadata struct {
 }
 
 // GetTemperature returns the temperature for this portal, or the default if not set.
+// Returns defaultTemp if the value is nil or out of valid range (0-1).
 func (p *PortalMetadata) GetTemperature(defaultTemp float64) float64 {
 	if p.Temperature == nil {
 		return defaultTemp
 	}
-	return *p.Temperature
+	temp := *p.Temperature
+	if temp < 0 || temp > 1 {
+		return defaultTemp
+	}
+	return temp
 }
 
 // UserLoginMetadata contains Claude-specific user login metadata.

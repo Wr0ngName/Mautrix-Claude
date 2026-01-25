@@ -2,6 +2,8 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -60,8 +62,9 @@ func (a *APIKeyLogin) SubmitUserInput(ctx context.Context, input map[string]stri
 		return nil, fmt.Errorf("failed to validate API key: %w", err)
 	}
 
-	// Create user login
-	loginID := networkid.UserLoginID(fmt.Sprintf("claude_%s", apiKey[len(apiKey)-20:]))
+	// Create user login with hashed API key (for privacy - no raw key material in ID)
+	hash := sha256.Sum256([]byte(apiKey))
+	loginID := networkid.UserLoginID(fmt.Sprintf("claude_%s", hex.EncodeToString(hash[:10])))
 	userLogin, err := a.User.NewLogin(ctx, &database.UserLogin{
 		ID:         loginID,
 		RemoteName: "Claude API User",

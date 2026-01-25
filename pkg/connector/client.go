@@ -37,8 +37,8 @@ var _ bridgev2.NetworkAPI = (*ClaudeClient)(nil)
 
 // Connect is called when the client should connect.
 func (c *ClaudeClient) Connect(ctx context.Context) {
-	// Create a cancellable context for this client's goroutines
-	c.ctx, c.cancel = context.WithCancel(context.Background())
+	// Create a cancellable context derived from parent for proper propagation
+	c.ctx, c.cancel = context.WithCancel(ctx)
 
 	// Start conversation cleanup goroutine if max age is configured
 	if c.Connector.Config.ConversationMaxAge > 0 {
@@ -147,7 +147,10 @@ func (c *ClaudeClient) getConversationManager(portal *bridgev2.Portal) *claudeap
 
 // HandleMatrixMessage handles a message sent from Matrix to Claude.
 func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
-	meta := msg.Portal.Metadata.(*PortalMetadata)
+	meta, ok := msg.Portal.Metadata.(*PortalMetadata)
+	if !ok || meta == nil {
+		return nil, fmt.Errorf("invalid portal metadata")
+	}
 
 	// Get or create conversation manager for this portal
 	convMgr := c.getConversationManager(msg.Portal)
@@ -184,11 +187,15 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")
 		return nil, c.formatUserFriendlyError(err)
 	}
+	if stream == nil {
+		return nil, fmt.Errorf("received nil stream from Claude API")
+	}
 
 	// Collect response
 	var responseText strings.Builder
 	var claudeMessageID string
 	var inputTokens, outputTokens int
+	var streamError error
 
 	for event := range stream {
 		switch event.Type {
@@ -209,7 +216,17 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			}
 		case "error":
 			c.Connector.Log.Error().Interface("event", event).Msg("Error in stream")
+			if event.Error != nil {
+				streamError = fmt.Errorf("streaming error: %s - %s", event.Error.Type, event.Error.Message)
+			} else {
+				streamError = fmt.Errorf("unknown streaming error")
+			}
 		}
+	}
+
+	// Check for streaming errors
+	if streamError != nil {
+		return nil, streamError
 	}
 
 	if claudeMessageID == "" {
@@ -235,13 +252,12 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	go func() {
 		defer c.wg.Done()
 
-		select {
-		case <-c.ctx.Done():
+		// Check if already shutting down before queuing
+		if c.ctx.Err() != nil {
 			c.Connector.Log.Debug().Msg("Skipping assistant response queue due to shutdown")
 			return
-		default:
-			c.queueAssistantResponse(msg.Portal, responseContent, claudeMessageID, inputTokens+outputTokens)
 		}
+		c.queueAssistantResponse(msg.Portal, responseContent, claudeMessageID, inputTokens+outputTokens)
 	}()
 
 	// Return response metadata
@@ -290,10 +306,9 @@ func (c *ClaudeClient) formatUserFriendlyError(err error) error {
 
 // queueAssistantResponse sends the assistant's message to the Matrix room.
 func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, messageID string, tokensUsed int) {
-	meta := portal.Metadata.(*PortalMetadata)
-	model := meta.Model
-	if model == "" {
-		model = c.Connector.Config.GetDefaultModel()
+	model := c.Connector.Config.GetDefaultModel()
+	if meta, ok := portal.Metadata.(*PortalMetadata); ok && meta != nil && meta.Model != "" {
+		model = meta.Model
 	}
 
 	ghostID := MakeClaudeGhostID(model)

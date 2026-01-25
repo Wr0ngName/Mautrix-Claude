@@ -11,9 +11,15 @@ import (
 
 // GetUserInfo returns information about a ghost user (Claude model).
 func (c *ClaudeClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
-	meta := ghost.Metadata.(*GhostMetadata)
+	meta, ok := ghost.Metadata.(*GhostMetadata)
+	if !ok || meta == nil {
+		return nil, fmt.Errorf("invalid ghost metadata")
+	}
 
 	modelName := meta.Model
+	if modelName == "" {
+		modelName = c.Connector.Config.GetDefaultModel()
+	}
 	displayName := fmt.Sprintf("Claude (%s)", modelName)
 
 	// Get model info for better display name
