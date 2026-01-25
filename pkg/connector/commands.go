@@ -517,10 +517,28 @@ func (c *ClaudeConnector) cmdMention(ce *commands.Event) {
 }
 
 // cmdJoin adds Claude to the current room by creating a bridge portal.
+// If Claude is already in the room, this re-configures the relay.
 func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
-	// Check if this room is already a portal
+	// If already a portal, just re-configure relay
 	if ce.Portal != nil {
-		ce.Reply("Claude is already in this room. Use `model` to change the model or `stats` to see conversation info.")
+		login := ce.User.GetDefaultLogin()
+		if login == nil {
+			ce.Reply("You are not logged in.")
+			return
+		}
+
+		if !c.br.Config.Relay.Enabled {
+			ce.Reply("Claude is already in this room. Relay mode is disabled in bridge config.\n\nUse `model` to change the model or `stats` to see conversation info.")
+			return
+		}
+
+		// Re-set relay to this user
+		if err := ce.Portal.SetRelay(ce.Ctx, login); err != nil {
+			ce.Reply("Failed to set relay: %v", err)
+			return
+		}
+
+		ce.Reply("✓ Relay updated! Messages from all users in this room will now be relayed through your account.\n\nUse `model` to change models, `mention on` for mention-only mode, or `unset-relay` to disable relay.")
 		return
 	}
 
