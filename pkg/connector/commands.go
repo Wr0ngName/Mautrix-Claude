@@ -636,13 +636,31 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 		}
 	}
 
+	// Auto-set relay so other users in the room can also talk to Claude
+	// This uses the joining user's login to relay messages from non-logged-in users
+	if c.br.Config.Relay.Enabled {
+		if err := portal.SetRelay(ctx, login); err != nil {
+			c.Log.Warn().Err(err).Msg("Failed to set relay for portal")
+			// Non-fatal - continue but warn user
+		} else {
+			c.Log.Debug().
+				Str("relay_login", string(login.ID)).
+				Msg("Auto-configured relay for portal")
+		}
+	}
+
 	displayName := claudeapi.GetModelDisplayName(model)
-	ce.Reply("✓ **%s** has joined the room!\n\nYou can now chat with Claude. Use `model` to change models, `system` to set a custom prompt, or `clear` to reset the conversation.", displayName)
+	if c.br.Config.Relay.Enabled {
+		ce.Reply("✓ **%s** has joined the room!\n\nAll users in this room can now chat with Claude (messages relayed through your account).\n\nUse `model` to change models, `system` to set a custom prompt, `mention on` for mention-only mode, or `clear` to reset conversation.", displayName)
+	} else {
+		ce.Reply("✓ **%s** has joined the room!\n\n⚠️ **Note:** Relay mode is disabled. Only you can talk to Claude. Enable `relay.enabled: true` in bridge config for multi-user support.\n\nUse `model` to change models, `system` to set a custom prompt, or `clear` to reset the conversation.", displayName)
+	}
 
 	c.Log.Info().
 		Str("room_id", string(roomID)).
 		Str("model", model).
 		Str("ghost_id", string(ghostID)).
+		Bool("relay_enabled", c.br.Config.Relay.Enabled).
 		Msg("Successfully added Claude to room")
 }
 
