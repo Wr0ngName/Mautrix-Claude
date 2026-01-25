@@ -537,7 +537,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	// Queue the assistant's response as an incoming message
-	// Use a context-aware goroutine with WaitGroup for graceful shutdown
+	// Use a goroutine with WaitGroup for graceful shutdown
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -546,13 +546,6 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 				c.Connector.Log.Error().Interface("panic", r).Msg("Panic in assistant response goroutine")
 			}
 		}()
-
-		// Check if already shutting down before queuing
-		// Nil check for safety in case Connect() hasn't been called yet
-		if c.ctx == nil || c.ctx.Err() != nil {
-			c.Connector.Log.Debug().Msg("Skipping assistant response queue due to shutdown or nil context")
-			return
-		}
 		c.queueAssistantResponse(msg.Portal, responseContent, claudeMessageID, inputTokens+outputTokens)
 	}()
 
