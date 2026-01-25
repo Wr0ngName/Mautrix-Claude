@@ -23,8 +23,9 @@ type ClaudeConnector struct {
 }
 
 var (
-	_ bridgev2.NetworkConnector      = (*ClaudeConnector)(nil)
-	_ bridgev2.MaxFileSizeingNetwork = (*ClaudeConnector)(nil)
+	_ bridgev2.NetworkConnector          = (*ClaudeConnector)(nil)
+	_ bridgev2.MaxFileSizeingNetwork     = (*ClaudeConnector)(nil)
+	_ bridgev2.IdentifierValidatingNetwork = (*ClaudeConnector)(nil)
 )
 
 // NewConnector creates a new Claude API bridge connector.
@@ -202,6 +203,17 @@ func (p *PortalMetadata) GetTemperature(defaultTemp float64) float64 {
 type UserLoginMetadata struct {
 	APIKey string `json:"api_key"`
 	Email  string `json:"email,omitempty"`
+}
+
+// ValidateUserID validates that a user ID is a valid Claude ghost ID.
+// This is called by the framework during ghost DM invite handling.
+func (c *ClaudeConnector) ValidateUserID(id networkid.UserID) bool {
+	switch string(id) {
+	case "sonnet", "opus", "haiku", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 // MakeClaudeGhostID creates a network user ID from a model name.

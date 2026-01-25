@@ -14,6 +14,18 @@ import (
 func (c *ClaudeConnector) RegisterCommands(proc *commands.Processor) {
 	proc.AddHandlers(
 		&commands.FullHandler{
+			Func:    c.cmdJoin,
+			Name:    "join",
+			Aliases: []string{"add", "invite"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "Add Claude to the current room (creates a bridge portal)",
+				Args:        "[model]",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: false, // Can be used in any room
+		},
+		&commands.FullHandler{
 			Func:    c.cmdModel,
 			Name:    "model",
 			Aliases: []string{"set-model", "switch-model"},
@@ -437,6 +449,136 @@ func (c *ClaudeConnector) cmdSystem(ce *commands.Event) {
 	}
 
 	ce.Reply("System prompt updated.")
+}
+
+// cmdJoin adds Claude to the current room by creating a bridge portal.
+func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
+	// Check if this room is already a portal
+	if ce.Portal != nil {
+		ce.Reply("Claude is already in this room. Use `model` to change the model or `stats` to see conversation info.")
+		return
+	}
+
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		ce.Reply("You are not logged in.")
+		return
+	}
+
+	client, ok := login.Client.(*ClaudeClient)
+	if !ok || client == nil {
+		ce.Reply("Failed to get client.")
+		return
+	}
+
+	// Determine model to use
+	model := c.Config.GetDefaultModel()
+	if len(ce.Args) > 0 {
+		requestedModel := strings.ToLower(strings.Join(ce.Args, "-"))
+		switch requestedModel {
+		case "opus", "claude-opus":
+			model = "opus"
+		case "sonnet", "claude-sonnet":
+			model = "sonnet"
+		case "haiku", "claude-haiku":
+			model = "haiku"
+		default:
+			// Assume it's a full model ID
+			if strings.Contains(requestedModel, "claude") {
+				model = requestedModel
+			} else {
+				ce.Reply("Unknown model: %s. Use `opus`, `sonnet`, `haiku`, or a full model ID.", requestedModel)
+				return
+			}
+		}
+	}
+
+	// Get the room ID from the event
+	roomID := ce.RoomID
+	if roomID == "" {
+		ce.Reply("Could not determine room ID.")
+		return
+	}
+
+	c.Log.Info().
+		Str("room_id", string(roomID)).
+		Str("model", model).
+		Str("user", string(ce.User.MXID)).
+		Msg("Join command: adding Claude to room")
+
+	// Create a unique conversation/portal ID based on the room
+	conversationID := fmt.Sprintf("room_%s", roomID)
+	portalKey := MakeClaudePortalKey(conversationID)
+
+	// Get or create the portal
+	ctx := ce.Ctx
+	portal, err := c.br.GetPortalByKey(ctx, portalKey)
+	if err != nil {
+		ce.Reply("Failed to get portal: %v", err)
+		return
+	}
+
+	// Check if this portal already has a different room associated
+	if portal.MXID != "" && portal.MXID != roomID {
+		ce.Reply("This portal is associated with a different room. Please use a new conversation.")
+		return
+	}
+
+	// Get the ghost for this model
+	ghostID := MakeClaudeGhostID(model)
+	ghost, err := c.br.GetGhostByID(ctx, ghostID)
+	if err != nil {
+		ce.Reply("Failed to get Claude ghost: %v", err)
+		return
+	}
+
+	// Set up portal metadata
+	chatName := fmt.Sprintf("Claude (%s)", model)
+	portalMeta := &PortalMetadata{
+		ConversationName: chatName,
+		Model:            model,
+	}
+
+	// Update the portal to use this room
+	if portal.MXID == "" {
+		// Link the existing Matrix room to this portal
+		portal.MXID = roomID
+		portal.Metadata = portalMeta
+
+		if err := portal.Save(ctx); err != nil {
+			ce.Reply("Failed to save portal: %v", err)
+			return
+		}
+	}
+
+	// Have the ghost join the room
+	err = ghost.Intent.EnsureJoined(ctx, roomID)
+	if err != nil {
+		c.Log.Warn().Err(err).Msg("Failed to join room with ghost, trying invite first")
+
+		// Try to invite and then join
+		botIntent := c.br.Bot
+		err = botIntent.EnsureInvited(ctx, roomID, ghost.Intent.GetMXID())
+		if err != nil {
+			ce.Reply("Failed to invite Claude to this room: %v\n\nMake sure the bot has permission to invite users.", err)
+			return
+		}
+
+		err = ghost.Intent.EnsureJoined(ctx, roomID)
+		if err != nil {
+			ce.Reply("Claude was invited but failed to join: %v", err)
+			return
+		}
+	}
+
+	displayName := claudeapi.GetModelDisplayName(model)
+	ce.Reply("✓ **%s** has joined the room!\n\nYou can now chat with Claude. Use `model` to change models, `system` to set a custom prompt, or `clear` to reset the conversation.", displayName)
+
+	c.Log.Info().
+		Str("room_id", string(roomID)).
+		Str("model", model).
+		Str("ghost_id", string(ghostID)).
+		Msg("Successfully added Claude to room")
 }
 
 // cmdTemperature views or sets the temperature.
