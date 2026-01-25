@@ -19,9 +19,9 @@ import (
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
 
-// ClaudeClient represents a client connection to Claude API.
+// ClaudeClient represents a client connection to Claude (API or Web).
 type ClaudeClient struct {
-	Client        *claudeapi.Client
+	MessageClient claudeapi.MessageClient // Can be *claudeapi.Client or *claudeapi.WebClient
 	UserLogin     *bridgev2.UserLogin
 	Connector     *ClaudeConnector
 	conversations map[networkid.PortalID]*claudeapi.ConversationManager
@@ -112,7 +112,7 @@ func (c *ClaudeClient) cleanupExpiredConversations(maxAge time.Duration) {
 
 // IsLoggedIn checks if the client is logged in.
 func (c *ClaudeClient) IsLoggedIn() bool {
-	return c.Client != nil && c.Client.APIKey != ""
+	return c.MessageClient != nil
 }
 
 // LogoutRemote logs out from the remote service.
@@ -182,7 +182,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	// Send to Claude API
-	stream, err := c.Client.CreateMessageStream(ctx, req)
+	stream, err := c.MessageClient.CreateMessageStream(ctx, req)
 	if err != nil {
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")
 		return nil, c.formatUserFriendlyError(err)
@@ -467,10 +467,10 @@ func (c *ClaudeClient) PreHandleMatrixMessage(ctx context.Context, msg *bridgev2
 
 // GetMetrics returns the API client metrics.
 func (c *ClaudeClient) GetMetrics() *claudeapi.Metrics {
-	if c.Client == nil {
+	if c.MessageClient == nil {
 		return nil
 	}
-	return c.Client.GetMetrics()
+	return c.MessageClient.GetMetrics()
 }
 
 // ClearConversation clears the conversation history for a portal.

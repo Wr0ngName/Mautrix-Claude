@@ -95,8 +95,13 @@ func (c *ClaudeConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{
 		{
 			Name:        "API Key",
-			Description: "Log in with your Claude API key from console.anthropic.com",
+			Description: "Log in with your Claude API key from console.anthropic.com (pay-per-use)",
 			ID:          "api_key",
+		},
+		{
+			Name:        "Session Cookie",
+			Description: "Log in with your claude.ai session cookie (Pro/Ultra subscription)",
+			ID:          "session_cookie",
 		},
 	}
 }
@@ -106,6 +111,11 @@ func (c *ClaudeConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 	switch flowID {
 	case "api_key":
 		return &APIKeyLogin{
+			User:      user,
+			Connector: c,
+		}, nil
+	case "session_cookie":
+		return &SessionCookieLogin{
 			User:      user,
 			Connector: c,
 		}, nil
@@ -121,14 +131,32 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		return fmt.Errorf("invalid user login metadata")
 	}
 
-	if metadata.APIKey == "" {
-		return fmt.Errorf("no stored API key")
+	log := c.Log.With().Str("user", string(login.UserMXID)).Logger()
+
+	var client claudeapi.MessageClient
+
+	switch metadata.AuthType {
+	case "session_cookie", "web":
+		if metadata.SessionKey == "" {
+			return fmt.Errorf("no stored session cookie")
+		}
+		webClient := claudeapi.NewWebClient(metadata.SessionKey, log)
+		if metadata.OrganizationID != "" {
+			webClient.OrganizationID = metadata.OrganizationID
+		}
+		client = webClient
+	case "api_key", "":
+		// Default to API key for backwards compatibility
+		if metadata.APIKey == "" {
+			return fmt.Errorf("no stored API key")
+		}
+		client = claudeapi.NewClient(metadata.APIKey, log)
+	default:
+		return fmt.Errorf("unknown auth type: %s", metadata.AuthType)
 	}
 
-	client := claudeapi.NewClient(metadata.APIKey, c.Log.With().Str("user", string(login.UserMXID)).Logger())
-
 	claudeClient := &ClaudeClient{
-		Client:        client,
+		MessageClient: client,
 		UserLogin:     login,
 		Connector:     c,
 		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
@@ -173,8 +201,18 @@ func (p *PortalMetadata) GetTemperature(defaultTemp float64) float64 {
 
 // UserLoginMetadata contains Claude-specific user login metadata.
 type UserLoginMetadata struct {
-	APIKey string `json:"api_key"`
-	Email  string `json:"email,omitempty"` // For display
+	// AuthType indicates the authentication method ("api_key" or "session_cookie")
+	AuthType string `json:"auth_type,omitempty"`
+
+	// API Key authentication (console.anthropic.com)
+	APIKey string `json:"api_key,omitempty"`
+
+	// Session cookie authentication (claude.ai)
+	SessionKey     string `json:"session_key,omitempty"`
+	OrganizationID string `json:"organization_id,omitempty"`
+
+	// Display info
+	Email string `json:"email,omitempty"`
 }
 
 // MakeClaudeGhostID creates a network user ID from a model name.

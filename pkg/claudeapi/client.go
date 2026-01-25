@@ -5,13 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/rs/zerolog"
 )
 
-// Client is a client for the Claude API.
+// Ensure Client implements MessageClient interface.
+var _ MessageClient = (*Client)(nil)
+
+// Client is a client for the Claude API (official API with API key authentication).
 type Client struct {
 	HTTPClient  *http.Client
 	APIKey      string
@@ -152,31 +156,45 @@ func (c *Client) CreateMessage(ctx context.Context, req *CreateMessageRequest) (
 func (c *Client) doRequest(ctx context.Context, req *CreateMessageRequest) (*CreateMessageResponse, error) {
 	reqBody, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/messages", bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	httpReq.Header.Set("x-api-key", c.APIKey)
 	httpReq.Header.Set("anthropic-version", c.Version)
 	httpReq.Header.Set("content-type", "application/json")
 
+	c.Log.Debug().
+		Str("url", httpReq.URL.String()).
+		Str("method", httpReq.Method).
+		Msg("Sending API request")
+
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	c.Log.Debug().
+		Int("status_code", resp.StatusCode).
+		Msg("Received API response")
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, ParseAPIError(resp)
+		apiErr := ParseAPIError(resp)
+		c.Log.Debug().
+			Err(apiErr).
+			Int("status_code", resp.StatusCode).
+			Msg("API returned error")
+		return nil, apiErr
 	}
 
 	var response CreateMessageResponse
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	return &response, nil
@@ -258,7 +276,13 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 }
 
 // ValidateAPIKey validates the API key by making a test request.
+// Deprecated: Use Validate instead.
 func (c *Client) ValidateAPIKey(ctx context.Context) error {
+	return c.Validate(ctx)
+}
+
+// Validate checks if the API key is valid by making a minimal test request.
+func (c *Client) Validate(ctx context.Context) error {
 	// Make a minimal request to validate the API key
 	req := &CreateMessageRequest{
 		Model: DefaultModel,
@@ -273,8 +297,24 @@ func (c *Client) ValidateAPIKey(ctx context.Context) error {
 		MaxTokens: 1,
 	}
 
+	c.Log.Debug().
+		Str("model", req.Model).
+		Str("base_url", c.BaseURL).
+		Msg("Validating API key")
+
 	_, err := c.CreateMessage(ctx, req)
+	if err != nil {
+		c.Log.Debug().
+			Err(err).
+			Str("error_type", fmt.Sprintf("%T", err)).
+			Msg("API key validation failed")
+	}
 	return err
+}
+
+// GetClientType returns the client type identifier.
+func (c *Client) GetClientType() string {
+	return ClientTypeAPI
 }
 
 // GetMetrics returns the metrics collector.

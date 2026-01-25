@@ -20,9 +20,17 @@ type APIKeyLogin struct {
 	Connector *ClaudeConnector
 }
 
+// SessionCookieLogin handles session cookie-based login.
+type SessionCookieLogin struct {
+	User      *bridgev2.User
+	Connector *ClaudeConnector
+}
+
 var (
 	_ bridgev2.LoginProcess          = (*APIKeyLogin)(nil)
 	_ bridgev2.LoginProcessUserInput = (*APIKeyLogin)(nil)
+	_ bridgev2.LoginProcess          = (*SessionCookieLogin)(nil)
+	_ bridgev2.LoginProcessUserInput = (*SessionCookieLogin)(nil)
 )
 
 // Start begins the API key login flow.
@@ -69,7 +77,8 @@ func (a *APIKeyLogin) SubmitUserInput(ctx context.Context, input map[string]stri
 		ID:         loginID,
 		RemoteName: "Claude API User",
 		Metadata: &UserLoginMetadata{
-			APIKey: apiKey,
+			AuthType: "api_key",
+			APIKey:   apiKey,
 		},
 	}, nil)
 	if err != nil {
@@ -78,7 +87,7 @@ func (a *APIKeyLogin) SubmitUserInput(ctx context.Context, input map[string]stri
 
 	// Set up client
 	claudeClient := &ClaudeClient{
-		Client:        client,
+		MessageClient: client,
 		UserLogin:     userLogin,
 		Connector:     a.Connector,
 		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
@@ -116,3 +125,75 @@ func isValidAPIKeyFormat(apiKey string) bool {
 
 	return true
 }
+
+// Start begins the session cookie login flow.
+func (s *SessionCookieLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
+	return &bridgev2.LoginStep{
+		Type:         bridgev2.LoginStepTypeUserInput,
+		StepID:       "session_cookie",
+		Instructions: "Enter your Claude session cookie. Get it from claude.ai (F12 > Application > Cookies > sessionKey)",
+		UserInputParams: &bridgev2.LoginUserInputParams{
+			Fields: []bridgev2.LoginInputDataField{
+				{
+					Type:        bridgev2.LoginInputFieldTypePassword,
+					ID:          "session_key",
+					Name:        "Session Key",
+					Description: "Your claude.ai sessionKey cookie value",
+				},
+			},
+		},
+	}, nil
+}
+
+// SubmitUserInput processes the submitted session cookie.
+func (s *SessionCookieLogin) SubmitUserInput(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+	sessionKey := strings.TrimSpace(input["session_key"])
+
+	// Validate session key is not empty
+	if sessionKey == "" {
+		return nil, fmt.Errorf("session key cannot be empty")
+	}
+
+	// Create web client and validate
+	client := claudeapi.NewWebClient(sessionKey, s.Connector.Log)
+	if err := client.Validate(ctx); err != nil {
+		return nil, fmt.Errorf("invalid session cookie: %w", err)
+	}
+
+	// Create user login with hashed session key (for privacy)
+	hash := sha256.Sum256([]byte(sessionKey))
+	loginID := networkid.UserLoginID(fmt.Sprintf("claude_web_%s", hex.EncodeToString(hash[:10])))
+	userLogin, err := s.User.NewLogin(ctx, &database.UserLogin{
+		ID:         loginID,
+		RemoteName: "Claude Web User",
+		Metadata: &UserLoginMetadata{
+			AuthType:       "session_cookie",
+			SessionKey:     sessionKey,
+			OrganizationID: client.OrganizationID,
+		},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set up client
+	claudeClient := &ClaudeClient{
+		MessageClient: client,
+		UserLogin:     userLogin,
+		Connector:     s.Connector,
+		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
+	}
+	userLogin.Client = claudeClient
+
+	return &bridgev2.LoginStep{
+		Type:         bridgev2.LoginStepTypeComplete,
+		StepID:       "complete",
+		Instructions: "Successfully authenticated with claude.ai",
+		CompleteParams: &bridgev2.LoginCompleteParams{
+			UserLogin: userLogin,
+		},
+	}, nil
+}
+
+// Cancel cancels the login process.
+func (s *SessionCookieLogin) Cancel() {}
