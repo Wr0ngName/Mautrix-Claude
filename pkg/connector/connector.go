@@ -42,6 +42,16 @@ func (c *ClaudeConnector) Init(bridge *bridgev2.Bridge) {
 func (c *ClaudeConnector) Start(ctx context.Context) error {
 	c.Log.Info().Msg("Claude API connector starting")
 
+	// Log loaded config for debugging
+	c.Log.Debug().
+		Str("default_model", c.Config.GetDefaultModel()).
+		Int("max_tokens", c.Config.GetMaxTokens()).
+		Float64("temperature", c.Config.GetTemperature()).
+		Str("system_prompt_preview", truncateString(c.Config.GetSystemPrompt(), 50)).
+		Int("conversation_max_age_hours", c.Config.ConversationMaxAge).
+		Int("rate_limit_per_minute", c.Config.GetRateLimitPerMinute()).
+		Msg("Loaded connector config")
+
 	// Register custom commands
 	if proc, ok := c.br.Commands.(*commands.Processor); ok {
 		c.RegisterCommands(proc)
@@ -49,6 +59,14 @@ func (c *ClaudeConnector) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// truncateString truncates a string to maxLen characters.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // GetName returns the name of the network.

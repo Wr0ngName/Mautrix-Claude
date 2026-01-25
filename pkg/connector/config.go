@@ -48,34 +48,33 @@ type Config struct {
 }
 
 // ExampleConfig is the example configuration for the connector.
-const ExampleConfig = `
-    # Claude API connector configuration
+const ExampleConfig = `# Claude API connector configuration
 
-    # Default Claude model to use
-    # Use family names (sonnet, opus, haiku) to automatically use the latest version
-    # Or specify a full model ID for a specific version
-    # Run the "models" command after login to see all available models
-    default_model: sonnet
+# Default Claude model to use
+# Use family names (sonnet, opus, haiku) to automatically use the latest version
+# Or specify a full model ID for a specific version
+# Run the "models" command after login to see all available models
+default_model: sonnet
 
-    # Maximum tokens for responses (depends on model, typically 4096-64000)
-    max_tokens: 4096
+# Maximum tokens for responses (depends on model, typically 4096-64000)
+max_tokens: 4096
 
-    # Temperature controls randomness (0.0-1.0, default 1.0)
-    # Lower = more focused and deterministic
-    # Higher = more creative and varied
-    # Set to 0 for most deterministic responses
-    temperature: 1.0
+# Temperature controls randomness (0.0-1.0, default 1.0)
+# Lower = more focused and deterministic
+# Higher = more creative and varied
+# Set to 0 for most deterministic responses
+temperature: 1.0
 
-    # Default system prompt (can be overridden per room)
-    system_prompt: "You are a helpful AI assistant."
+# Default system prompt (can be overridden per room)
+system_prompt: "You are a helpful AI assistant."
 
-    # Maximum conversation age in hours (0 = unlimited)
-    # Older conversations will be cleared from context
-    conversation_max_age_hours: 24
+# Maximum conversation age in hours (0 = unlimited)
+# Older conversations will be cleared from context
+conversation_max_age_hours: 24
 
-    # Rate limiting (requests per minute, 0 = unlimited)
-    # Helps prevent API rate limit errors
-    rate_limit_per_minute: 60
+# Rate limiting (requests per minute, 0 = unlimited)
+# Helps prevent API rate limit errors
+rate_limit_per_minute: 60
 `
 
 // Validate validates the configuration.
