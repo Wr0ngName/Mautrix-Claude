@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
+	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/format"
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
@@ -313,15 +314,15 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 			TokensUsed:      tokensUsed,
 		},
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
+			// Convert markdown to Matrix HTML format
+			content := format.RenderMarkdown(text, true, true)
+			content.MsgType = event.MsgText
 			return &bridgev2.ConvertedMessage{
 				Parts: []*bridgev2.ConvertedMessagePart{
 					{
-						ID:   networkid.PartID(messageID),
-						Type: event.EventMessage,
-						Content: &event.MessageEventContent{
-							MsgType: event.MsgText,
-							Body:    text,
-						},
+						ID:      networkid.PartID(messageID),
+						Type:    event.EventMessage,
+						Content: &content,
 					},
 				},
 			}, nil
