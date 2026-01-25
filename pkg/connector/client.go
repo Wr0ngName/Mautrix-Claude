@@ -186,6 +186,7 @@ func (r *RateLimiter) WaitTime() time.Duration {
 var (
 	_ bridgev2.NetworkAPI                     = (*ClaudeClient)(nil)
 	_ bridgev2.IdentifierResolvingNetworkAPI = (*ClaudeClient)(nil)
+	_ bridgev2.MembershipHandlingNetworkAPI  = (*ClaudeClient)(nil)
 )
 
 // Connect is called when the client should connect.
@@ -806,6 +807,31 @@ func (c *ClaudeClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev
 func (c *ClaudeClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.MatrixTyping) error {
 	// Silently ignore typing notifications
 	return nil
+}
+
+// HandleMatrixMembership handles membership changes including ghost invitations.
+// This allows users to invite Claude ghost users to rooms directly.
+func (c *ClaudeClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.MatrixMembershipChange) (*bridgev2.MatrixMembershipResult, error) {
+	// We only care about invites to ghost users
+	if msg.Type != bridgev2.Invite {
+		return nil, nil
+	}
+
+	// Check if the target is a ghost (Claude bot being invited)
+	// GhostOrUserLogin is an interface - use type assertion to check if it's a Ghost
+	ghost, isGhost := msg.Target.(*bridgev2.Ghost)
+	if !isGhost || ghost == nil {
+		return nil, nil
+	}
+
+	c.Connector.Log.Info().
+		Str("ghost_id", string(ghost.ID)).
+		Str("room_id", string(msg.Portal.MXID)).
+		Msg("Claude ghost invited to room, accepting invitation")
+
+	// Accept the invitation - the bridge framework handles the actual join
+	// Return nil to indicate success and let the framework process it
+	return nil, nil
 }
 
 // PreHandleMatrixMessage is called before handling a Matrix message.
