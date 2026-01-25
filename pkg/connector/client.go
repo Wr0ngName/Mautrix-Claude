@@ -556,14 +556,15 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		c.queueAssistantResponse(msg.Portal, responseContent, claudeMessageID, inputTokens+outputTokens)
 	}()
 
-	// Return response metadata
+	// Return response metadata for the outgoing (user -> Claude) message
+	// Use a unique ID based on user's Matrix event ID to avoid collision with Claude's response ID
 	return &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
-			ID:        MakeClaudeMessageID(claudeMessageID),
+			ID:        networkid.MessageID("user_" + userMsgID),
 			Timestamp: time.Now(),
 			Metadata: &MessageMetadata{
-				ClaudeMessageID: claudeMessageID,
-				TokensUsed:      inputTokens + outputTokens,
+				ClaudeMessageID: "user_" + userMsgID,
+				TokensUsed:      0, // User messages don't have token usage
 			},
 		},
 	}, nil
