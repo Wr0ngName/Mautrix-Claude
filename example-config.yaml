@@ -1,3 +1,11 @@
+# mautrix-claude configuration
+#
+# IMPORTANT: The bridge bot needs power level 50+ in management rooms to redact
+# sensitive commands (like login). Either:
+# 1. Ensure your homeserver gives appservice bots appropriate power levels
+# 2. Manually set the bot's power level in the management room after creation
+# 3. Accept the "Failed to redact" warnings (login still works, just not redacted)
+
 # Homeserver details
 homeserver:
     # The address that this appservice can use to connect to the homeserver.
@@ -31,7 +39,7 @@ appservice:
     # Format examples:
     #   SQLite:   sqlite:filename.db
     #   Postgres: postgres://user:password@host/database?sslmode=disable
-    database: sqlite:mautrix-candy.db
+    database: sqlite:mautrix-claude.db
     # Additional arguments for asyncpg.create_pool() or sqlite3.connect()
     # https://magicstack.github.io/asyncpg/current/api/index.html#asyncpg.pool.create_pool
     # https://docs.python.org/3/library/sqlite3.html#sqlite3.connect
@@ -40,13 +48,13 @@ appservice:
         min_size: 1
         max_size: 10
     # The unique ID of this appservice.
-    id: candy
+    id: claude
     # Username of the appservice bot.
-    bot_username: candybot
+    bot_username: claudebot
     # Display name and avatar for bot. Set to "remove" to remove display name/avatar, leave empty
     # to leave display name/avatar as-is.
-    bot_displayname: Candy.ai bridge bot
-    bot_avatar: mxc://maunium.net/candy
+    bot_displayname: Claude AI bridge bot
+    bot_avatar: mxc://maunium.net/claude
     # Whether or not to receive ephemeral events via appservice transactions.
     # Requires MSC2409 support (i.e. Synapse 1.22+).
     ephemeral_events: true
@@ -59,38 +67,35 @@ appservice:
 
 # Bridge config
 bridge:
-    # Localpart template of MXIDs for candy.ai users.
-    # {{.}} is replaced with the profile slug of the candy.ai character.
-    username_template: candy_{{.}}
-    # Displayname template for candy.ai users.
-    # {{.ProfileName}} is replaced with the AI character's name.
-    displayname_template: "{{.ProfileName}} (Candy.ai)"
+    # Localpart template of MXIDs for Claude users.
+    # {{.}} is replaced with the Claude model family (e.g., opus, sonnet).
+    username_template: claude_{{.}}
+    # Displayname template for Claude users.
+    # {{.ProfileName}} is replaced with the model name.
+    displayname_template: "{{.ProfileName}} (Claude AI)"
     # Whether to explicitly set the avatar and room name for private chat portal rooms.
     private_chat_portal_meta: true
     # Whether or not the bridge should send a read receipt after successfully bridging a message.
     delivery_receipts: false
     # Whether or not created Matrix rooms should have federation enabled.
     federate_rooms: true
-    # Settings for backfilling messages from candy.ai.
+    # Settings for backfilling messages (not applicable for Claude).
     backfill:
-        # Whether or not the candy.ai users of logged in Matrix users should be
-        # temporary. Temporary users can't start new chats.
-        enabled: true
-        # Number of messages to backfill initially.
-        max_initial_messages: 50
+        enabled: false
+        max_initial_messages: 0
     # The prefix for commands. Only required in non-management rooms.
-    command_prefix: "!candy"
+    command_prefix: "!claude"
     # Messages sent upon joining a management room.
     # Markdown is supported. The defaults are listed below.
     management_room_text:
         # Sent when joining a room.
-        welcome: "Hello, I'm a Candy.ai bridge bot."
+        welcome: "Hello, I'm a Claude AI bridge bot."
         # Sent when joining a management room and the user is already logged in.
         welcome_connected: "Use `help` for help."
         # Sent when joining a management room and the user is not logged in.
         welcome_unconnected: "Use `help` for help or `login` to log in."
         # Optional extra text sent when joining a management room.
-        additional_help: ""
+        additional_help: "Supported login methods: API key (console.anthropic.com) or session cookie (claude.ai Pro/Ultra)."
     # End-to-bridge encryption support options.
     encryption:
         # Allow encryption, work in group chat rooms with e2ee enabled
@@ -157,17 +162,31 @@ bridge:
         "example.com": user
         "@admin:example.com": admin
 
-# Candy.ai connector specific options
-candy:
-    # Base URL for candy.ai
-    base_url: https://candy.ai
-    # Custom user agent (optional)
-    user_agent: ""
-    # Sync conversations on connect
-    sync_on_connect: true
-    # Backfill message history
-    backfill_enabled: true
-    backfill_max_messages: 50
+# Claude connector specific options
+claude:
+    # Default Claude model to use
+    # Valid models: claude-opus-4-5-20251101, claude-sonnet-4-5-20250924,
+    #               claude-3-5-sonnet-20241022, claude-3-5-haiku-20241022,
+    #               claude-3-opus-20240229
+    default_model: claude-3-5-sonnet-20241022
+
+    # Maximum tokens for responses (1-16384 depending on model)
+    max_tokens: 4096
+
+    # Temperature controls randomness (0.0-1.0, default 1.0)
+    # Lower = more focused and deterministic
+    # Higher = more creative and varied
+    temperature: 1.0
+
+    # Default system prompt (can be overridden per room)
+    system_prompt: "You are a helpful AI assistant."
+
+    # Maximum conversation age in hours (0 = unlimited)
+    # Older conversations will be cleared from context
+    conversation_max_age_hours: 24
+
+    # Rate limiting (requests per minute, 0 = unlimited)
+    rate_limit_per_minute: 60
 
 # Logging config
 logging:
