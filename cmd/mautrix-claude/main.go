@@ -14,15 +14,28 @@ var (
 	BuildTime = "unknown"
 )
 
+var m mxmain.BridgeMain
+
 func main() {
-	m := mxmain.BridgeMain{
+	c := connector.NewConnector()
+	m = mxmain.BridgeMain{
 		Name:        "mautrix-claude",
 		URL:         "https://github.com/mautrix/claude",
 		Description: "A Matrix-Claude API bridge",
 		Version:     "0.1.0",
-		Connector:   connector.NewConnector(),
+		Connector:   c,
+		PostInit:    postInit,
 	}
 
 	m.InitVersion(Tag, Commit, BuildTime)
 	m.Run()
+}
+
+// postInit is called after bridge initialization but before start.
+// We use this to set up the custom QueryHandler for ghost user existence queries.
+func postInit() {
+	// Set the QueryHandler on the appservice to handle ghost user queries
+	m.Matrix.AS.QueryHandler = &connector.GhostQueryHandler{
+		Matrix: m.Matrix,
+	}
 }

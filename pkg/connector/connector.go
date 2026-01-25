@@ -205,12 +205,14 @@ type UserLoginMetadata struct {
 }
 
 // MakeClaudeGhostID creates a network user ID from a model name.
+// Returns just the family name (e.g., "sonnet", "opus", "haiku") since the
+// username_template in config already adds the "claude_" prefix.
 func MakeClaudeGhostID(model string) networkid.UserID {
 	family := claudeapi.GetModelFamily(model)
 	if family == "" {
 		family = model
 	}
-	return networkid.UserID(fmt.Sprintf("claude_%s", family))
+	return networkid.UserID(family)
 }
 
 // MakeClaudePortalKey creates a portal key from a conversation identifier.
