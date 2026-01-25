@@ -1,6 +1,15 @@
 // Package claudeapi provides a client for the Claude API.
 package claudeapi
 
+import (
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+)
+
 // Message represents a message in a conversation.
 type Message struct {
 	Role    string    `json:"role"`    // "user" or "assistant"
@@ -82,4 +91,102 @@ type APIError struct {
 // Error implements the error interface.
 func (e *APIError) Error() string {
 	return e.Type + ": " + e.Message
+}
+
+// IsRateLimitError checks if an error is a rate limit error (429).
+func IsRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusTooManyRequests
+	}
+
+	// Fallback to string matching for other error types
+	errStr := err.Error()
+	return strings.Contains(errStr, "rate_limit") || strings.Contains(errStr, "429")
+}
+
+// IsAuthError checks if an error is an authentication error (401, 403).
+func IsAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusUnauthorized ||
+			apiErr.StatusCode == http.StatusForbidden
+	}
+
+	// Fallback to string matching for other error types
+	errStr := err.Error()
+	return strings.Contains(errStr, "authentication") ||
+		strings.Contains(errStr, "unauthorized") ||
+		strings.Contains(errStr, "invalid_api_key")
+}
+
+// IsOverloadedError checks if an error is an overloaded/server error (5xx, 529).
+func IsOverloadedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 500 ||
+			apiErr.StatusCode == 529 // Overloaded
+	}
+
+	// Fallback to string matching for other error types
+	errStr := err.Error()
+	return strings.Contains(errStr, "overloaded") ||
+		strings.Contains(errStr, "server_error")
+}
+
+// IsInvalidRequestError checks if an error is an invalid request error (400).
+func IsInvalidRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusBadRequest
+	}
+
+	// Fallback to string matching for other error types
+	errStr := err.Error()
+	return strings.Contains(errStr, "invalid_request") ||
+		strings.Contains(errStr, "bad request")
+}
+
+// GetRetryAfter attempts to extract retry-after duration from an error.
+// Returns 0 if no retry-after information is available.
+func GetRetryAfter(err error) time.Duration {
+	if err == nil {
+		return 0
+	}
+
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		// Check for Retry-After header if response is available
+		if apiErr.Response != nil {
+			if retryAfter := apiErr.Response.Header.Get("Retry-After"); retryAfter != "" {
+				// Try to parse as seconds
+				if seconds, parseErr := time.ParseDuration(retryAfter + "s"); parseErr == nil {
+					return seconds
+				}
+			}
+		}
+	}
+
+	// Default retry time for rate limits
+	if IsRateLimitError(err) {
+		return 30 * time.Second
+	}
+
+	return 0
 }

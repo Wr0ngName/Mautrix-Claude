@@ -745,8 +745,8 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 
 	// Get display name for the model
 	displayName := fmt.Sprintf("Claude (%s)", model)
-	if info := claudeapi.GetModelInfo(model); info != nil {
-		displayName = info.Name
+	if info := claudeapi.GetModelInfo(model); info != nil && info.DisplayName != "" {
+		displayName = info.DisplayName
 	}
 	isBot := true
 
@@ -827,22 +827,19 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 }
 
 // parseModelIdentifier parses an identifier and returns the full model name.
+// This uses friendly aliases that map to actual model IDs.
 func (c *ClaudeClient) parseModelIdentifier(identifier string) string {
 	identifier = strings.ToLower(strings.TrimSpace(identifier))
 
-	// Direct match with known models
-	if claudeapi.ValidateModel(identifier) {
-		return identifier
-	}
-
-	// Map friendly names to model families
+	// Map friendly names to default model aliases
+	// These will be validated against the API when used
 	switch identifier {
 	case "claude", "sonnet", "claude-sonnet":
 		return c.Connector.Config.GetDefaultModel()
 	case "opus", "claude-opus":
-		return claudeapi.ModelOpus3
+		return "claude-opus-4-5-20251101"
 	case "haiku", "claude-haiku":
-		return claudeapi.ModelHaiku3_5
+		return "claude-haiku-4-5-20251001"
 	}
 
 	// Check if it's a model family name (e.g., "claude_opus" ghost ID format)
@@ -850,12 +847,17 @@ func (c *ClaudeClient) parseModelIdentifier(identifier string) string {
 		family := strings.TrimPrefix(identifier, "claude_")
 		switch family {
 		case "opus":
-			return claudeapi.ModelOpus3
+			return "claude-opus-4-5-20251101"
 		case "sonnet":
 			return c.Connector.Config.GetDefaultModel()
 		case "haiku":
-			return claudeapi.ModelHaiku3_5
+			return "claude-haiku-4-5-20251001"
 		}
+	}
+
+	// Assume it's a direct model ID - let the API validate it
+	if strings.Contains(identifier, "claude") {
+		return identifier
 	}
 
 	// No match found

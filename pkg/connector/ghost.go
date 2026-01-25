@@ -23,8 +23,8 @@ func (c *ClaudeClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (
 	displayName := fmt.Sprintf("Claude (%s)", modelName)
 
 	// Get model info for better display name
-	if info := claudeapi.GetModelInfo(modelName); info != nil {
-		displayName = info.Name
+	if info := claudeapi.GetModelInfo(modelName); info != nil && info.DisplayName != "" {
+		displayName = info.DisplayName
 	}
 
 	isBot := true

@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -83,6 +84,19 @@ func (c *ClaudeConnector) RegisterCommands(proc *commands.Processor) {
 	)
 }
 
+// getAPIKeyFromLogin extracts the API key from a user login.
+func (c *ClaudeConnector) getAPIKeyFromLogin(ce *commands.Event) string {
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		return ""
+	}
+	meta, ok := login.Metadata.(*UserLoginMetadata)
+	if !ok || meta == nil {
+		return ""
+	}
+	return meta.APIKey
+}
+
 // cmdModel views or changes the Claude model for a conversation.
 func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 	if ce.Portal == nil {
@@ -106,37 +120,47 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("**Current model:** `%s`\n\n", currentModel))
 
-		if info := claudeapi.GetModelInfo(currentModel); info != nil {
-			sb.WriteString(fmt.Sprintf("**Name:** %s\n", info.Name))
-			sb.WriteString(fmt.Sprintf("**Max input tokens:** %d\n", info.MaxInputTokens))
-			sb.WriteString(fmt.Sprintf("**Max output tokens:** %d\n", info.MaxOutputTokens))
+		// Try to get display name from cache
+		displayName := claudeapi.GetModelDisplayName(currentModel)
+		if displayName != currentModel {
+			sb.WriteString(fmt.Sprintf("**Name:** %s\n", displayName))
 		}
+
+		inputTokens, outputTokens := claudeapi.EstimateMaxTokens(currentModel)
+		sb.WriteString(fmt.Sprintf("**Max input tokens:** %d\n", inputTokens))
+		sb.WriteString(fmt.Sprintf("**Max output tokens:** %d\n", outputTokens))
 
 		sb.WriteString("\nUse `model <name>` to change. Run `models` to see available options.")
 		ce.Reply(sb.String())
 		return
 	}
 
-	// Set new model
-	newModel := strings.ToLower(strings.Join(ce.Args, "-"))
-
-	// Map friendly names to full model names
-	switch newModel {
-	case "opus", "opus-3":
-		newModel = claudeapi.ModelOpus3
-	case "sonnet", "sonnet-3.5", "sonnet-3-5":
-		newModel = claudeapi.ModelSonnet3_5
-	case "sonnet-3":
-		newModel = claudeapi.ModelSonnet3
-	case "haiku", "haiku-3.5", "haiku-3-5":
-		newModel = claudeapi.ModelHaiku3_5
-	case "haiku-3":
-		newModel = claudeapi.ModelHaiku3
+	// Get API key to validate model
+	apiKey := c.getAPIKeyFromLogin(ce)
+	if apiKey == "" {
+		ce.Reply("Failed to get API credentials.")
+		return
 	}
 
-	// Validate the model
-	if !claudeapi.ValidateModel(newModel) {
-		ce.Reply("Unknown model: `%s`\n\nRun `models` to see available options.", newModel)
+	// Set new model - resolve alias if needed
+	newModel := strings.Join(ce.Args, "-")
+
+	// Map friendly shortcuts to model aliases (API will resolve these)
+	switch strings.ToLower(newModel) {
+	case "opus", "claude-opus":
+		newModel = "claude-opus-4-5-20251101"
+	case "sonnet", "claude-sonnet":
+		newModel = "claude-sonnet-4-5-20250929"
+	case "haiku", "claude-haiku":
+		newModel = "claude-haiku-4-5-20251001"
+	}
+
+	// Validate the model exists via API
+	ctx, cancel := context.WithTimeout(ce.Ctx, 10*time.Second)
+	defer cancel()
+
+	if err := claudeapi.ValidateModel(ctx, apiKey, newModel); err != nil {
+		ce.Reply("Invalid model: `%s`\n\nError: %v\n\nRun `models` to see available options.", newModel, err)
 		return
 	}
 
@@ -147,38 +171,80 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 		return
 	}
 
-	info := claudeapi.GetModelInfo(newModel)
-	if info != nil {
-		ce.Reply("Model changed to **%s** (`%s`)", info.Name, newModel)
+	displayName := claudeapi.GetModelDisplayName(newModel)
+	if displayName != newModel {
+		ce.Reply("Model changed to **%s** (`%s`)", displayName, newModel)
 	} else {
 		ce.Reply("Model changed to `%s`", newModel)
 	}
 }
 
-// cmdModels lists available Claude models.
+// cmdModels lists available Claude models by querying the API.
 func (c *ClaudeConnector) cmdModels(ce *commands.Event) {
+	// Get API key
+	apiKey := c.getAPIKeyFromLogin(ce)
+	if apiKey == "" {
+		ce.Reply("Failed to get API credentials.")
+		return
+	}
+
+	// Fetch models from API
+	ctx, cancel := context.WithTimeout(ce.Ctx, 15*time.Second)
+	defer cancel()
+
+	models, err := claudeapi.FetchModels(ctx, apiKey)
+	if err != nil {
+		ce.Reply("Failed to fetch models from API: %v", err)
+		return
+	}
+
+	if len(models) == 0 {
+		ce.Reply("No models available.")
+		return
+	}
+
 	var sb strings.Builder
 	sb.WriteString("**Available Claude Models:**\n\n")
 
 	defaultModel := c.Config.GetDefaultModel()
 
-	for _, model := range claudeapi.ValidModels {
-		info := claudeapi.GetModelInfo(model)
-		if info != nil {
-			isDefault := ""
-			if model == defaultModel {
-				isDefault = " (default)"
-			}
-			sb.WriteString(fmt.Sprintf("• **%s**%s\n", info.Name, isDefault))
-			sb.WriteString(fmt.Sprintf("  `%s`\n", model))
-			sb.WriteString(fmt.Sprintf("  Input: %dk tokens, Output: %dk tokens\n\n",
-				info.MaxInputTokens/1000, info.MaxOutputTokens/1000))
-		} else {
-			sb.WriteString(fmt.Sprintf("• `%s`\n", model))
-		}
+	// Group by family
+	families := map[string][]claudeapi.ModelInfo{
+		"opus":   {},
+		"sonnet": {},
+		"haiku":  {},
+		"other":  {},
 	}
 
-	sb.WriteString("Use `model <name>` to switch models in a conversation room.\n")
+	for _, model := range models {
+		family := model.Family
+		if family == "unknown" {
+			family = "other"
+		}
+		families[family] = append(families[family], model)
+	}
+
+	// Display in order: opus, sonnet, haiku, other
+	for _, family := range []string{"opus", "sonnet", "haiku", "other"} {
+		familyModels := families[family]
+		if len(familyModels) == 0 {
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf("**%s:**\n", strings.Title(family)))
+		for _, model := range familyModels {
+			isDefault := ""
+			if model.ID == defaultModel {
+				isDefault = " *(default)*"
+			}
+
+			sb.WriteString(fmt.Sprintf("• **%s**%s\n", model.DisplayName, isDefault))
+			sb.WriteString(fmt.Sprintf("  `%s`\n", model.ID))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Use `model <model-id>` to switch models.\n")
 	sb.WriteString("Shortcuts: `opus`, `sonnet`, `haiku`")
 
 	ce.Reply(sb.String())
@@ -244,8 +310,10 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 	if meta != nil && meta.Model != "" {
 		model = meta.Model
 	}
-	if info := claudeapi.GetModelInfo(model); info != nil {
-		sb.WriteString(fmt.Sprintf("**Model:** %s (`%s`)\n", info.Name, model))
+
+	displayName := claudeapi.GetModelDisplayName(model)
+	if displayName != model {
+		sb.WriteString(fmt.Sprintf("**Model:** %s (`%s`)\n", displayName, model))
 	} else {
 		sb.WriteString(fmt.Sprintf("**Model:** `%s`\n", model))
 	}

@@ -2,6 +2,7 @@ package connector
 
 import (
 	"fmt"
+	"strings"
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
@@ -36,11 +37,11 @@ const ExampleConfig = `
     # Claude API connector configuration
 
     # Default Claude model to use
-    # Valid models: claude-opus-4-5-20251101, claude-sonnet-4-5-20250924,
-    #               claude-3-5-haiku-20241022, claude-3-opus-20240229
-    default_model: claude-sonnet-4-5-20250924
+    # Run the "models" command after login to see available models
+    # Common options: claude-sonnet-4-5-20250929, claude-opus-4-5-20251101, claude-haiku-4-5-20251001
+    default_model: claude-sonnet-4-5-20250929
 
-    # Maximum tokens for responses (1-16384 depending on model)
+    # Maximum tokens for responses (depends on model, typically 4096-64000)
     max_tokens: 4096
 
     # Temperature controls randomness (0.0-1.0, default 1.0)
@@ -62,10 +63,11 @@ const ExampleConfig = `
 `
 
 // Validate validates the configuration.
+// Note: Model validation is done at runtime via API, not at config load time.
 func (c *Config) Validate() error {
-	// Validate model if set
-	if c.DefaultModel != "" && !claudeapi.ValidateModel(c.DefaultModel) {
-		return fmt.Errorf("invalid model: %s", c.DefaultModel)
+	// Basic model format check (must look like a Claude model)
+	if c.DefaultModel != "" && !strings.Contains(strings.ToLower(c.DefaultModel), "claude") {
+		return fmt.Errorf("invalid model format: %s (must be a Claude model ID)", c.DefaultModel)
 	}
 
 	// Validate temperature if set
@@ -80,9 +82,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("max_tokens must be non-negative, got %d", c.MaxTokens)
 	}
 
-	// Check against the maximum output tokens across all models (opus 4.5 has 16384)
-	if c.MaxTokens > 16384 {
-		return fmt.Errorf("max_tokens (%d) exceeds maximum supported (16384)", c.MaxTokens)
+	// Check against reasonable max (models vary, but 128k is a safe upper bound)
+	if c.MaxTokens > 128000 {
+		return fmt.Errorf("max_tokens (%d) exceeds reasonable maximum (128000)", c.MaxTokens)
 	}
 
 	// Validate conversation max age
@@ -101,7 +103,7 @@ func (c *Config) Validate() error {
 // GetDefaultModel returns the default model, using a fallback if not set.
 func (c *Config) GetDefaultModel() string {
 	if c.DefaultModel == "" {
-		return claudeapi.DefaultModel
+		return claudeapi.GetDefaultModelID()
 	}
 	return c.DefaultModel
 }

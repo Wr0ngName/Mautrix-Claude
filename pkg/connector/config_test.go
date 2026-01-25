@@ -98,7 +98,7 @@ func TestConfigValidation(t *testing.T) {
 			name: "max tokens too high",
 			config: Config{
 				DefaultModel: "claude-3-5-sonnet-20241022",
-				MaxTokens:    100000,
+				MaxTokens:    200000, // Exceeds 128000 limit
 				Temperature:  TemperaturePtr(0.7),
 			},
 			expectError: true,

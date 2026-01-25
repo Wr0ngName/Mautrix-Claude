@@ -7,6 +7,21 @@ import (
 	"time"
 )
 
+// Token estimation constants.
+const (
+	// ApproxCharsPerToken is the approximate number of characters per token.
+	// Claude uses a similar tokenization to other LLMs where ~4 chars ≈ 1 token.
+	ApproxCharsPerToken = 4
+
+	// ContextTrimTargetPercent is the target percentage of max tokens to keep
+	// when trimming context. This provides headroom for responses.
+	ContextTrimTargetPercent = 80
+
+	// MinMessagesToKeep is the minimum number of messages to keep in conversation
+	// history, even when trimming for token limits.
+	MinMessagesToKeep = 2
+)
+
 // TrackedMessage wraps a Message with an external ID for tracking.
 type TrackedMessage struct {
 	Message

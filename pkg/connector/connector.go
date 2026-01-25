@@ -4,7 +4,6 @@ package connector
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
@@ -56,7 +55,7 @@ func (c *ClaudeConnector) Start(ctx context.Context) error {
 func (c *ClaudeConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
 		DisplayName:      "Claude AI",
-		NetworkURL:       "https://claude.ai",
+		NetworkURL:       "https://console.anthropic.com",
 		NetworkIcon:      "mxc://maunium.net/claude",
 		NetworkID:        "claude",
 		BeeperBridgeType: "go.mau.fi/mautrix-claude",
@@ -84,7 +83,6 @@ func (c *ClaudeConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities
 }
 
 // GetBridgeInfoVersion returns version numbers for bridge info and room capabilities.
-// When the versions change, the bridge will automatically resend bridge info to all rooms.
 func (c *ClaudeConnector) GetBridgeInfoVersion() (info, capabilities int) {
 	return 1, 1
 }
@@ -94,9 +92,9 @@ func (c *ClaudeConnector) GetConfig() (example string, data any, upgrader config
 	return ExampleConfig, &c.Config, nil
 }
 
-// SetMaxFileSize returns the maximum file size for uploads.
+// SetMaxFileSize sets the maximum file size for uploads.
 func (c *ClaudeConnector) SetMaxFileSize(maxSize int64) {
-	// Claude API supports images, but for now we don't implement file uploads
+	// Claude API supports images up to 20MB
 }
 
 // GetLoginFlows returns the available login flows.
@@ -104,13 +102,8 @@ func (c *ClaudeConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{
 		{
 			Name:        "API Key",
-			Description: "Log in with your Claude API key from console.anthropic.com (pay-per-use)",
+			Description: "Log in with your Claude API key from console.anthropic.com",
 			ID:          "api_key",
-		},
-		{
-			Name:        "Session Cookie",
-			Description: "Log in with your claude.ai session cookie (Pro/Ultra subscription)",
-			ID:          "session_cookie",
 		},
 	}
 }
@@ -120,11 +113,6 @@ func (c *ClaudeConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 	switch flowID {
 	case "api_key":
 		return &APIKeyLogin{
-			User:      user,
-			Connector: c,
-		}, nil
-	case "session_cookie":
-		return &SessionCookieLogin{
 			User:      user,
 			Connector: c,
 		}, nil
@@ -142,37 +130,11 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 
 	log := c.Log.With().Str("user", string(login.UserMXID)).Logger()
 
-	var client claudeapi.MessageClient
-
-	switch metadata.AuthType {
-	case "session_cookie", "web":
-		if metadata.SessionKey == "" {
-			return fmt.Errorf("no stored session cookie")
-		}
-		// SessionKey may store full cookie string (with cf_clearance etc.)
-		sessionKey := extractSessionKeyFromCookies(metadata.SessionKey)
-		if sessionKey == "" {
-			// Backwards compatibility: SessionKey might be just the key value
-			sessionKey = metadata.SessionKey
-		}
-		webClient := claudeapi.NewWebClient(sessionKey, log)
-		// If the stored value contains semicolons, it's the full cookie string
-		if strings.Contains(metadata.SessionKey, ";") {
-			webClient.AllCookies = metadata.SessionKey
-		}
-		if metadata.OrganizationID != "" {
-			webClient.OrganizationID = metadata.OrganizationID
-		}
-		client = webClient
-	case "api_key", "":
-		// Default to API key for backwards compatibility
-		if metadata.APIKey == "" {
-			return fmt.Errorf("no stored API key")
-		}
-		client = claudeapi.NewClient(metadata.APIKey, log)
-	default:
-		return fmt.Errorf("unknown auth type: %s", metadata.AuthType)
+	if metadata.APIKey == "" {
+		return fmt.Errorf("no stored API key")
 	}
+
+	client := claudeapi.NewClient(metadata.APIKey, log)
 
 	claudeClient := &ClaudeClient{
 		MessageClient: client,
@@ -203,11 +165,10 @@ type PortalMetadata struct {
 	ConversationName string   `json:"conversation_name"`
 	Model            string   `json:"model"`                   // Selected model for this room
 	SystemPrompt     string   `json:"system_prompt,omitempty"` // Custom system prompt
-	Temperature      *float64 `json:"temperature,omitempty"`   // Custom temperature (pointer to distinguish unset from 0)
+	Temperature      *float64 `json:"temperature,omitempty"`   // Custom temperature
 }
 
 // GetTemperature returns the temperature for this portal, or the default if not set.
-// Returns defaultTemp if the value is nil or out of valid range (0-1).
 func (p *PortalMetadata) GetTemperature(defaultTemp float64) float64 {
 	if p.Temperature == nil {
 		return defaultTemp
@@ -221,23 +182,12 @@ func (p *PortalMetadata) GetTemperature(defaultTemp float64) float64 {
 
 // UserLoginMetadata contains Claude-specific user login metadata.
 type UserLoginMetadata struct {
-	// AuthType indicates the authentication method ("api_key" or "session_cookie")
-	AuthType string `json:"auth_type,omitempty"`
-
-	// API Key authentication (console.anthropic.com)
-	APIKey string `json:"api_key,omitempty"`
-
-	// Session cookie authentication (claude.ai)
-	SessionKey     string `json:"session_key,omitempty"`
-	OrganizationID string `json:"organization_id,omitempty"`
-
-	// Display info
-	Email string `json:"email,omitempty"`
+	APIKey string `json:"api_key"`
+	Email  string `json:"email,omitempty"`
 }
 
 // MakeClaudeGhostID creates a network user ID from a model name.
 func MakeClaudeGhostID(model string) networkid.UserID {
-	// Use model family for ghost ID to group similar models
 	family := claudeapi.GetModelFamily(model)
 	if family == "" {
 		family = model
@@ -256,15 +206,4 @@ func MakeClaudePortalKey(conversationID string) networkid.PortalKey {
 // MakeClaudeMessageID creates a message ID from a Claude message ID.
 func MakeClaudeMessageID(messageID string) networkid.MessageID {
 	return networkid.MessageID(messageID)
-}
-
-// extractSessionKeyFromCookies extracts the sessionKey value from a cookie string.
-func extractSessionKeyFromCookies(cookies string) string {
-	for _, part := range strings.Split(cookies, ";") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "sessionKey=") {
-			return strings.TrimPrefix(part, "sessionKey=")
-		}
-	}
-	return ""
 }

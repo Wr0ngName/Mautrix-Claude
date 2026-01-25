@@ -1,4 +1,4 @@
-// Package claudeapi provides a client for the Claude API.
+// Package claudeapi provides a wrapper around the official Anthropic Go SDK.
 package claudeapi
 
 import (
@@ -6,7 +6,6 @@ import (
 )
 
 // MessageClient is the interface for sending messages to Claude.
-// This interface is implemented by both the official API client and the web client.
 type MessageClient interface {
 	// CreateMessageStream sends a message and returns a channel of streaming events.
 	CreateMessageStream(ctx context.Context, req *CreateMessageRequest) (<-chan StreamEvent, error)
@@ -20,12 +19,11 @@ type MessageClient interface {
 	// GetMetrics returns the metrics collector for this client.
 	GetMetrics() *Metrics
 
-	// GetClientType returns the type of client ("api" or "web").
+	// GetClientType returns the type of client.
 	GetClientType() string
 }
 
-// ClientType constants for identifying client implementations.
+// ClientType constant.
 const (
 	ClientTypeAPI = "api"
-	ClientTypeWeb = "web"
 )
