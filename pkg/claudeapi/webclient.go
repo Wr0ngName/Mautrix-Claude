@@ -5,8 +5,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -22,6 +25,7 @@ type WebClient struct {
 	BaseURL        string
 	Log            zerolog.Logger
 	Metrics        *Metrics
+	RetryConfig    RetryConfig
 }
 
 // Ensure WebClient implements MessageClient interface.
@@ -57,10 +61,11 @@ func NewWebClient(sessionKey string, log zerolog.Logger, opts ...WebClientOption
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
-		SessionKey: sessionKey,
-		BaseURL:    "https://claude.ai",
-		Log:        log,
-		Metrics:    NewMetrics(),
+		SessionKey:  sessionKey,
+		BaseURL:     "https://claude.ai",
+		Log:         log,
+		Metrics:     NewMetrics(),
+		RetryConfig: DefaultRetryConfig(),
 	}
 
 	for _, opt := range opts {
@@ -108,29 +113,62 @@ type webStreamResponse struct {
 
 // GetOrganizations fetches the user's organizations.
 func (c *WebClient) GetOrganizations(ctx context.Context) ([]webOrganization, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/api/organizations", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	c.setHeaders(req)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get organizations: status %d", resp.StatusCode)
-	}
-
 	var orgs []webOrganization
-	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
-		return nil, err
+	var lastErr error
+
+	for attempt := 0; attempt <= c.RetryConfig.MaxRetries; attempt++ {
+		if attempt > 0 {
+			c.Metrics.RecordRetry()
+			c.Log.Debug().Int("attempt", attempt).Msg("Retrying get organizations request")
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/api/organizations", nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		c.setHeaders(req)
+
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("HTTP request failed: %w", err)
+			if !c.RetryConfig.ShouldRetry(attempt, lastErr) {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			if waitErr := c.RetryConfig.WaitForRetry(ctx, attempt, lastErr); waitErr != nil {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = c.parseWebError(resp)
+			resp.Body.Close()
+			if !c.RetryConfig.ShouldRetry(attempt, lastErr) {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			if waitErr := c.RetryConfig.WaitForRetry(ctx, attempt, lastErr); waitErr != nil {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			continue
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+		resp.Body.Close()
+		return orgs, nil
 	}
 
-	return orgs, nil
+	if lastErr != nil {
+		c.Metrics.RecordError(lastErr)
+	}
+	return nil, lastErr
 }
 
 // CreateConversation creates a new conversation.
@@ -148,37 +186,73 @@ func (c *WebClient) CreateConversation(ctx context.Context, name string) (*webCo
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", c.BaseURL, c.OrganizationID)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	var conv *webConversation
+	var lastErr error
+
+	for attempt := 0; attempt <= c.RetryConfig.MaxRetries; attempt++ {
+		if attempt > 0 {
+			c.Metrics.RecordRetry()
+			c.Log.Debug().Int("attempt", attempt).Msg("Retrying create conversation request")
+		}
+
+		url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", c.BaseURL, c.OrganizationID)
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		c.setHeaders(req)
+
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("HTTP request failed: %w", err)
+			if !c.RetryConfig.ShouldRetry(attempt, lastErr) {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			if waitErr := c.RetryConfig.WaitForRetry(ctx, attempt, lastErr); waitErr != nil {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			lastErr = c.parseWebError(resp)
+			resp.Body.Close()
+			if !c.RetryConfig.ShouldRetry(attempt, lastErr) {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			if waitErr := c.RetryConfig.WaitForRetry(ctx, attempt, lastErr); waitErr != nil {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			continue
+		}
+
+		conv = &webConversation{}
+		if err := json.NewDecoder(resp.Body).Decode(conv); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+		resp.Body.Close()
+		return conv, nil
 	}
 
-	c.setHeaders(req)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
+	if lastErr != nil {
+		c.Metrics.RecordError(lastErr)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("failed to create conversation: status %d", resp.StatusCode)
-	}
-
-	var conv webConversation
-	if err := json.NewDecoder(resp.Body).Decode(&conv); err != nil {
-		return nil, err
-	}
-
-	return &conv, nil
+	return nil, lastErr
 }
 
 // CreateMessageStream sends a message and returns streaming events.
 func (c *WebClient) CreateMessageStream(ctx context.Context, req *CreateMessageRequest) (<-chan StreamEvent, error) {
+	startTime := time.Now()
+
 	if c.OrganizationID == "" {
 		if err := c.fetchOrganizationID(ctx); err != nil {
 			return nil, fmt.Errorf("failed to get organization ID: %w", err)
@@ -202,31 +276,74 @@ func (c *WebClient) CreateMessageStream(ctx context.Context, req *CreateMessageR
 
 	body, err := json.Marshal(chatReq)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s/completion",
-		c.BaseURL, c.OrganizationID, conv.UUID)
+	var lastErr error
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt <= c.RetryConfig.MaxRetries; attempt++ {
+		if attempt > 0 {
+			c.Metrics.RecordRetry()
+			c.Log.Debug().Int("attempt", attempt).Str("model", req.Model).Msg("Retrying streaming request")
+		}
+
+		url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s/completion",
+			c.BaseURL, c.OrganizationID, conv.UUID)
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		c.setHeaders(httpReq)
+		httpReq.Header.Set("Accept", "text/event-stream")
+
+		c.Log.Debug().
+			Str("url", url).
+			Str("model", req.Model).
+			Msg("Sending streaming request")
+
+		resp, err := c.HTTPClient.Do(httpReq)
+		if err != nil {
+			lastErr = fmt.Errorf("HTTP request failed: %w", err)
+			if !c.RetryConfig.ShouldRetry(attempt, lastErr) {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			if waitErr := c.RetryConfig.WaitForRetry(ctx, attempt, lastErr); waitErr != nil {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = c.parseWebError(resp)
+			resp.Body.Close()
+			c.Log.Debug().
+				Int("status_code", resp.StatusCode).
+				Err(lastErr).
+				Msg("API returned error")
+			if !c.RetryConfig.ShouldRetry(attempt, lastErr) {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			if waitErr := c.RetryConfig.WaitForRetry(ctx, attempt, lastErr); waitErr != nil {
+				c.Metrics.RecordError(lastErr)
+				return nil, lastErr
+			}
+			continue
+		}
+
+		// Success - record metrics and return stream
+		c.Metrics.RecordRequest(req.Model, time.Since(startTime), 0, 0)
+		return c.streamWebMessages(ctx, resp, req.Model, conv.UUID)
 	}
 
-	c.setHeaders(httpReq)
-	httpReq.Header.Set("Accept", "text/event-stream")
-
-	resp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return nil, err
+	if lastErr != nil {
+		c.Metrics.RecordError(lastErr)
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("failed to send message: status %d", resp.StatusCode)
-	}
-
-	return c.streamWebMessages(ctx, resp, req.Model, conv.UUID)
+	return nil, lastErr
 }
 
 // streamWebMessages processes the SSE stream from claude.ai.
@@ -425,8 +542,61 @@ func (c *WebClient) buildPromptFromMessages(messages []Message, systemPrompt str
 	return strings.TrimSpace(prompt.String())
 }
 
-// generateUUID generates a simple UUID for conversations.
+// generateUUID generates a UUID v4 for conversations.
 func generateUUID() string {
-	// Simple UUID generation - in production, use a proper UUID library
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp if crypto/rand fails (shouldn't happen)
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	// Set version (4) and variant (2) bits per RFC 4122
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hex.EncodeToString(b[0:4]),
+		hex.EncodeToString(b[4:6]),
+		hex.EncodeToString(b[6:8]),
+		hex.EncodeToString(b[8:10]),
+		hex.EncodeToString(b[10:16]))
+}
+
+// parseWebError parses error responses from the claude.ai web API.
+func (c *WebClient) parseWebError(resp *http.Response) error {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return &APIError{
+			Type:    "read_error",
+			Message: fmt.Sprintf("HTTP %d: failed to read response body", resp.StatusCode),
+		}
+	}
+
+	// Try to parse as JSON error
+	var errResp struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+
+	if err := json.Unmarshal(body, &errResp); err == nil {
+		if errResp.Error.Message != "" {
+			return &APIError{
+				Type:    errResp.Error.Type,
+				Message: errResp.Error.Message,
+			}
+		}
+		if errResp.Message != "" {
+			return &APIError{
+				Type:    "web_error",
+				Message: errResp.Message,
+			}
+		}
+	}
+
+	// Return raw body as error message
+	return &APIError{
+		Type:    "web_error",
+		Message: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)),
+	}
 }

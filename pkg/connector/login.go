@@ -63,7 +63,7 @@ func (a *APIKeyLogin) SubmitUserInput(ctx context.Context, input map[string]stri
 
 	// Test the API key
 	client := claudeapi.NewClient(apiKey, a.Connector.Log)
-	if err := client.ValidateAPIKey(ctx); err != nil {
+	if err := client.Validate(ctx); err != nil {
 		if claudeapi.IsAuthError(err) {
 			return nil, fmt.Errorf("invalid API key: authentication failed")
 		}
