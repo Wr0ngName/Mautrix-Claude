@@ -27,10 +27,99 @@ type ClaudeClient struct {
 	conversations map[networkid.PortalID]*claudeapi.ConversationManager
 	convMu        sync.RWMutex
 
+	// Rate limiting
+	rateLimiter *RateLimiter
+
 	// Graceful shutdown support
 	wg     sync.WaitGroup
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// RateLimiter implements a simple sliding window rate limiter.
+type RateLimiter struct {
+	mu           sync.Mutex
+	maxRequests  int
+	windowSize   time.Duration
+	requestTimes []time.Time
+}
+
+// NewRateLimiter creates a new rate limiter with the given requests per minute.
+// If requestsPerMinute is 0 or negative, rate limiting is disabled.
+func NewRateLimiter(requestsPerMinute int) *RateLimiter {
+	if requestsPerMinute <= 0 {
+		return nil
+	}
+	return &RateLimiter{
+		maxRequests:  requestsPerMinute,
+		windowSize:   time.Minute,
+		requestTimes: make([]time.Time, 0, requestsPerMinute),
+	}
+}
+
+// Allow checks if a request is allowed and records it if so.
+// Returns true if the request is allowed, false if rate limited.
+func (r *RateLimiter) Allow() bool {
+	if r == nil {
+		return true
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-r.windowSize)
+
+	// Remove expired entries
+	validTimes := make([]time.Time, 0, len(r.requestTimes))
+	for _, t := range r.requestTimes {
+		if t.After(windowStart) {
+			validTimes = append(validTimes, t)
+		}
+	}
+	r.requestTimes = validTimes
+
+	// Check if we're at the limit
+	if len(r.requestTimes) >= r.maxRequests {
+		return false
+	}
+
+	// Record this request
+	r.requestTimes = append(r.requestTimes, now)
+	return true
+}
+
+// WaitTime returns how long to wait before the next request will be allowed.
+// Returns 0 if a request is allowed immediately.
+func (r *RateLimiter) WaitTime() time.Duration {
+	if r == nil {
+		return 0
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-r.windowSize)
+
+	// Remove expired entries and count valid ones
+	validCount := 0
+	var oldestValid time.Time
+	for _, t := range r.requestTimes {
+		if t.After(windowStart) {
+			validCount++
+			if oldestValid.IsZero() || t.Before(oldestValid) {
+				oldestValid = t
+			}
+		}
+	}
+
+	if validCount < r.maxRequests {
+		return 0
+	}
+
+	// Calculate when the oldest request will expire
+	return oldestValid.Add(r.windowSize).Sub(now)
 }
 
 var (
@@ -161,6 +250,15 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		Str("sender", string(msg.Event.Sender)).
 		Str("body", msg.Content.Body[:min(50, len(msg.Content.Body))]).
 		Msg("Handling Matrix message")
+
+	// Check rate limit before processing
+	if !c.rateLimiter.Allow() {
+		waitTime := c.rateLimiter.WaitTime()
+		c.Connector.Log.Warn().
+			Dur("wait_time", waitTime).
+			Msg("Rate limited, rejecting message")
+		return nil, fmt.Errorf("rate limit exceeded. Please wait %s before sending another message", waitTime.Round(time.Second))
+	}
 
 	// Get or create conversation manager for this portal
 	convMgr := c.getConversationManager(msg.Portal)

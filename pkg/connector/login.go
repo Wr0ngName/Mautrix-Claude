@@ -85,12 +85,13 @@ func (a *APIKeyLogin) SubmitUserInput(ctx context.Context, input map[string]stri
 		return nil, err
 	}
 
-	// Set up client
+	// Set up client with rate limiter
 	claudeClient := &ClaudeClient{
 		MessageClient: client,
 		UserLogin:     userLogin,
 		Connector:     a.Connector,
 		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
+		rateLimiter:   NewRateLimiter(a.Connector.Config.RateLimitPerMinute),
 	}
 	userLogin.Client = claudeClient
 
@@ -193,12 +194,13 @@ func (s *SessionCookieLogin) SubmitUserInput(ctx context.Context, input map[stri
 		return nil, err
 	}
 
-	// Set up client
+	// Set up client with rate limiter
 	claudeClient := &ClaudeClient{
 		MessageClient: client,
 		UserLogin:     userLogin,
 		Connector:     s.Connector,
 		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
+		rateLimiter:   NewRateLimiter(s.Connector.Config.RateLimitPerMinute),
 	}
 	userLogin.Client = claudeClient
 
