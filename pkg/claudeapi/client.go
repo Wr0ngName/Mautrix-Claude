@@ -113,6 +113,11 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 
 	stream := c.sdk.Messages.NewStreaming(ctx, sdkParams)
 
+	// Check if stream was created successfully
+	if stream == nil {
+		return nil, fmt.Errorf("failed to create message stream")
+	}
+
 	// Create output channel with buffer size of 100.
 	// Buffer size rationale: Allows for ~100 text delta events to queue without blocking,
 	// which covers typical response bursts. Too small risks blocking the SDK's HTTP reader,
@@ -122,6 +127,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 	// Start goroutine to process stream with proper context cancellation handling
 	go func() {
 		defer close(eventCh)
+		defer stream.Close() // Ensure stream is closed to release resources
 		defer func() {
 			if r := recover(); r != nil {
 				c.Log.Error().Interface("panic", r).Msg("Panic in stream processing goroutine")
@@ -191,6 +197,12 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 		} else {
 			// Record successful request
 			duration := time.Since(startTime)
+			c.Log.Debug().
+				Str("model", req.Model).
+				Dur("duration", duration).
+				Int("input_tokens", inputTokens).
+				Int("output_tokens", outputTokens).
+				Msg("Stream completed successfully, recording metrics")
 			c.Metrics.RecordRequest(req.Model, duration, inputTokens, outputTokens)
 		}
 	}()
