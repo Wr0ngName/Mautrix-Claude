@@ -122,16 +122,16 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 
 	// Map friendly names to full model names
 	switch newModel {
-	case "opus", "opus-4.5", "opus-4-5":
-		newModel = claudeapi.ModelOpus4_5
-	case "sonnet", "sonnet-4.5", "sonnet-4-5":
-		newModel = claudeapi.ModelSonnet4_5
-	case "sonnet-3.5", "sonnet-3-5":
+	case "opus", "opus-3":
+		newModel = claudeapi.ModelOpus3
+	case "sonnet", "sonnet-3.5", "sonnet-3-5":
 		newModel = claudeapi.ModelSonnet3_5
+	case "sonnet-3":
+		newModel = claudeapi.ModelSonnet3
 	case "haiku", "haiku-3.5", "haiku-3-5":
 		newModel = claudeapi.ModelHaiku3_5
-	case "opus-3", "opus-3.0":
-		newModel = claudeapi.ModelOpus3
+	case "haiku-3":
+		newModel = claudeapi.ModelHaiku3
 	}
 
 	// Validate the model

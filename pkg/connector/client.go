@@ -840,7 +840,7 @@ func (c *ClaudeClient) parseModelIdentifier(identifier string) string {
 	case "claude", "sonnet", "claude-sonnet":
 		return c.Connector.Config.GetDefaultModel()
 	case "opus", "claude-opus":
-		return claudeapi.ModelOpus4_5
+		return claudeapi.ModelOpus3
 	case "haiku", "claude-haiku":
 		return claudeapi.ModelHaiku3_5
 	}
@@ -850,7 +850,7 @@ func (c *ClaudeClient) parseModelIdentifier(identifier string) string {
 		family := strings.TrimPrefix(identifier, "claude_")
 		switch family {
 		case "opus":
-			return claudeapi.ModelOpus4_5
+			return claudeapi.ModelOpus3
 		case "sonnet":
 			return c.Connector.Config.GetDefaultModel()
 		case "haiku":

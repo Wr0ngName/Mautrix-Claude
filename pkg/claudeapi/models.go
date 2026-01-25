@@ -13,15 +13,18 @@ import (
 
 // Model constants for Claude API (fallbacks if API unavailable).
 const (
-	ModelOpus4_5   = "claude-opus-4-5-20251101"
-	ModelSonnet4_5 = "claude-sonnet-4-5-20250924"
+	// Claude 3.5 models (latest generation)
 	ModelSonnet3_5 = "claude-3-5-sonnet-20241022"
 	ModelHaiku3_5  = "claude-3-5-haiku-20241022"
-	ModelOpus3     = "claude-3-opus-20240229"
+
+	// Claude 3 models
+	ModelOpus3   = "claude-3-opus-20240229"
+	ModelSonnet3 = "claude-3-sonnet-20240229"
+	ModelHaiku3  = "claude-3-haiku-20240307"
 )
 
 // DefaultModel is the default Claude model to use.
-var DefaultModel = ModelSonnet4_5
+var DefaultModel = ModelSonnet3_5
 
 // modelCache stores dynamically fetched models.
 var (
@@ -107,13 +110,13 @@ func GetLatestModelByFamily(models []APIModel, family string) string {
 		// Return fallback
 		switch family {
 		case "opus":
-			return ModelOpus4_5
+			return ModelOpus3
 		case "sonnet":
-			return ModelSonnet4_5
+			return ModelSonnet3_5
 		case "haiku":
 			return ModelHaiku3_5
 		default:
-			return ModelSonnet4_5
+			return ModelSonnet3_5
 		}
 	}
 
@@ -127,11 +130,11 @@ func GetLatestModelByFamily(models []APIModel, family string) string {
 
 // ValidModels is a list of all valid Claude models.
 var ValidModels = []string{
-	ModelOpus4_5,
-	ModelSonnet4_5,
 	ModelSonnet3_5,
 	ModelHaiku3_5,
 	ModelOpus3,
+	ModelSonnet3,
+	ModelHaiku3,
 }
 
 // ModelInfo contains information about a Claude model.
@@ -144,18 +147,6 @@ type ModelInfo struct {
 
 // modelInfoMap maps model IDs to their info.
 var modelInfoMap = map[string]*ModelInfo{
-	ModelOpus4_5: {
-		Name:            "Claude Opus 4.5",
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 16384,
-		Family:          "opus",
-	},
-	ModelSonnet4_5: {
-		Name:            "Claude Sonnet 4.5",
-		MaxInputTokens:  200000,
-		MaxOutputTokens: 8192,
-		Family:          "sonnet",
-	},
 	ModelSonnet3_5: {
 		Name:            "Claude 3.5 Sonnet",
 		MaxInputTokens:  200000,
@@ -173,6 +164,18 @@ var modelInfoMap = map[string]*ModelInfo{
 		MaxInputTokens:  200000,
 		MaxOutputTokens: 4096,
 		Family:          "opus",
+	},
+	ModelSonnet3: {
+		Name:            "Claude 3 Sonnet",
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 4096,
+		Family:          "sonnet",
+	},
+	ModelHaiku3: {
+		Name:            "Claude 3 Haiku",
+		MaxInputTokens:  200000,
+		MaxOutputTokens: 4096,
+		Family:          "haiku",
 	},
 }
 
