@@ -165,9 +165,9 @@ bridge:
 # Claude connector specific options
 claude:
     # Default Claude model to use
-    # Valid models: claude-opus-4-5-20251101, claude-sonnet-4-5-20250924,
+    # Valid models: claude-opus-4-5-20251101, claude-sonnet-4-5-20250929,
     #               claude-3-5-haiku-20241022, claude-3-opus-20240229
-    default_model: claude-sonnet-4-5-20250924
+    default_model: claude-sonnet-4-5-20250929
 
     # Maximum tokens for responses (1-16384 depending on model)
     max_tokens: 4096
