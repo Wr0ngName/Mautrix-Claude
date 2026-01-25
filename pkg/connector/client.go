@@ -380,7 +380,8 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	if meta.MentionOnly {
 		if !c.isClaudeMentioned(msg) {
 			c.Connector.Log.Debug().Msg("Mention-only mode: Claude not mentioned, ignoring message")
-			return nil, nil
+			// Return empty response to indicate message was handled but no action taken
+			return &bridgev2.MatrixMessageResponse{}, nil
 		}
 		c.Connector.Log.Debug().Msg("Mention-only mode: Claude mentioned, processing message")
 	}
