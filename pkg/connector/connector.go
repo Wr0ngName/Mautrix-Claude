@@ -141,7 +141,7 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		UserLogin:     login,
 		Connector:     c,
 		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
-		rateLimiter:   NewRateLimiter(c.Config.RateLimitPerMinute),
+		rateLimiter:   NewRateLimiter(c.Config.GetRateLimitPerMinute()),
 	}
 
 	login.Client = claudeClient

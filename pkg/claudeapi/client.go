@@ -113,44 +113,80 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 
 	stream := c.sdk.Messages.NewStreaming(ctx, sdkParams)
 
-	// Create output channel
+	// Create output channel with buffer size of 100.
+	// Buffer size rationale: Allows for ~100 text delta events to queue without blocking,
+	// which covers typical response bursts. Too small risks blocking the SDK's HTTP reader,
+	// too large wastes memory. 100 provides good balance for streaming responses.
 	eventCh := make(chan StreamEvent, 100)
 
-	// Start goroutine to process stream
+	// Start goroutine to process stream with proper context cancellation handling
 	go func() {
 		defer close(eventCh)
+		defer func() {
+			if r := recover(); r != nil {
+				c.Log.Error().Interface("panic", r).Msg("Panic in stream processing goroutine")
+			}
+		}()
 		startTime := time.Now()
 		var inputTokens, outputTokens int
 
 		for stream.Next() {
+			// Check for context cancellation to prevent goroutine leak
+			select {
+			case <-ctx.Done():
+				c.Log.Debug().Msg("Stream cancelled by context")
+				return
+			default:
+			}
+
 			event := stream.Current()
 
 			// Convert SDK event to our format
 			streamEvent := convertSDKStreamEvent(event)
-			if streamEvent != nil {
-				// Track token usage
-				if streamEvent.Message != nil && streamEvent.Message.Usage != nil {
-					if streamEvent.Message.Usage.InputTokens > 0 {
-						inputTokens = streamEvent.Message.Usage.InputTokens
-					}
-				}
-				if streamEvent.Usage != nil && streamEvent.Usage.OutputTokens > 0 {
-					outputTokens = streamEvent.Usage.OutputTokens
-				}
+			if streamEvent == nil {
+				// Log dropped events for debugging - these are usually harmless
+				// (e.g., ping events, unknown event types) but worth tracking
+				c.Log.Trace().Str("event_type", string(event.Type)).Msg("Dropped unhandled stream event")
+				continue
+			}
 
-				eventCh <- *streamEvent
+			// Track token usage
+			if streamEvent.Message != nil && streamEvent.Message.Usage != nil {
+				if streamEvent.Message.Usage.InputTokens > 0 {
+					inputTokens = streamEvent.Message.Usage.InputTokens
+				}
+			}
+			if streamEvent.Usage != nil && streamEvent.Usage.OutputTokens > 0 {
+				outputTokens = streamEvent.Usage.OutputTokens
+			}
+
+			// Non-blocking send to prevent deadlock if receiver abandons channel
+			select {
+			case eventCh <- *streamEvent:
+			case <-ctx.Done():
+				c.Log.Debug().Msg("Stream cancelled while sending event")
+				return
 			}
 		}
 
 		if err := stream.Err(); err != nil {
+			// Check if error is due to context cancellation
+			if ctx.Err() != nil {
+				c.Log.Debug().Msg("Stream ended due to context cancellation")
+				return
+			}
 			c.Log.Error().Err(err).Msg("Stream error")
 			c.Metrics.RecordError(err)
-			eventCh <- StreamEvent{
+			// Non-blocking error send
+			select {
+			case eventCh <- StreamEvent{
 				Type: "error",
 				Error: &StreamError{
 					Type:    "stream_error",
 					Message: err.Error(),
 				},
+			}:
+			case <-ctx.Done():
 			}
 		} else {
 			// Record successful request

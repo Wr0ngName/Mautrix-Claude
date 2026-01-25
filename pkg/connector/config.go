@@ -10,6 +10,23 @@ import (
 // DefaultTemperature is the default temperature when not specified.
 const DefaultTemperature = 1.0
 
+// Input validation limits to prevent abuse and excessive API costs.
+const (
+	// MaxMessageLength is the maximum allowed message length in characters.
+	// Claude models support ~100k tokens, but we limit to prevent abuse.
+	MaxMessageLength = 100000
+
+	// MaxModelIDLength is the maximum length for model identifiers.
+	MaxModelIDLength = 100
+
+	// MinRateLimitPerMinute is the minimum rate limit to prevent abuse.
+	// Setting to 0 in config means "use default", not "unlimited".
+	MinRateLimitPerMinute = 1
+
+	// DefaultRateLimitPerMinute is used when rate limit is not set or set to 0.
+	DefaultRateLimitPerMinute = 60
+)
+
 // Config contains the configuration for the Claude connector.
 type Config struct {
 	// DefaultModel is the default Claude model to use
@@ -131,6 +148,37 @@ func (c *Config) GetSystemPrompt() string {
 		return "You are a helpful AI assistant."
 	}
 	return c.SystemPrompt
+}
+
+// GetRateLimitPerMinute returns the rate limit, enforcing a minimum.
+// A configured value of 0 means "use default", not "unlimited".
+func (c *Config) GetRateLimitPerMinute() int {
+	if c.RateLimitPerMinute <= 0 {
+		return DefaultRateLimitPerMinute
+	}
+	if c.RateLimitPerMinute < MinRateLimitPerMinute {
+		return MinRateLimitPerMinute
+	}
+	return c.RateLimitPerMinute
+}
+
+// ValidateMessageLength checks if a message is within allowed limits.
+func ValidateMessageLength(msg string) error {
+	if len(msg) > MaxMessageLength {
+		return fmt.Errorf("message too long: %d characters (max %d)", len(msg), MaxMessageLength)
+	}
+	return nil
+}
+
+// ValidateModelID checks if a model ID is valid.
+func ValidateModelID(modelID string) error {
+	if len(modelID) > MaxModelIDLength {
+		return fmt.Errorf("model ID too long: %d characters (max %d)", len(modelID), MaxModelIDLength)
+	}
+	if modelID != "" && !strings.Contains(strings.ToLower(modelID), "claude") {
+		return fmt.Errorf("invalid model ID format: must be a Claude model")
+	}
+	return nil
 }
 
 // TemperaturePtr is a helper to create a pointer to a float64.

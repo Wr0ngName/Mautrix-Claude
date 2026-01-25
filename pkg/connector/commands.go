@@ -155,6 +155,12 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 		newModel = "claude-haiku-4-5-20251001"
 	}
 
+	// Validate model ID format first (prevents abuse with overly long strings)
+	if err := ValidateModelID(newModel); err != nil {
+		ce.Reply("Invalid model ID: %v", err)
+		return
+	}
+
 	// Validate the model exists via API
 	ctx, cancel := context.WithTimeout(ce.Ctx, 10*time.Second)
 	defer cancel()
@@ -164,9 +170,11 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 		return
 	}
 
-	// Update portal metadata
+	// Update portal metadata - save old value for rollback on failure
+	oldModel := meta.Model
 	meta.Model = newModel
 	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		meta.Model = oldModel // Rollback in-memory state on save failure
 		ce.Reply("Failed to save model change: %v", err)
 		return
 	}
@@ -392,8 +400,10 @@ func (c *ClaudeConnector) cmdSystem(ce *commands.Event) {
 
 	// Check for clear command
 	if strings.ToLower(ce.Args[0]) == "clear" {
+		oldPrompt := meta.SystemPrompt
 		meta.SystemPrompt = ""
 		if err := ce.Portal.Save(ce.Ctx); err != nil {
+			meta.SystemPrompt = oldPrompt // Rollback in-memory state on save failure
 			ce.Reply("Failed to clear system prompt: %v", err)
 			return
 		}
@@ -401,10 +411,12 @@ func (c *ClaudeConnector) cmdSystem(ce *commands.Event) {
 		return
 	}
 
-	// Set new system prompt
+	// Set new system prompt - save old value for rollback on failure
 	newPrompt := strings.Join(ce.Args, " ")
+	oldPrompt := meta.SystemPrompt
 	meta.SystemPrompt = newPrompt
 	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		meta.SystemPrompt = oldPrompt // Rollback in-memory state on save failure
 		ce.Reply("Failed to save system prompt: %v", err)
 		return
 	}
@@ -437,8 +449,10 @@ func (c *ClaudeConnector) cmdTemperature(ce *commands.Event) {
 
 	// Check for reset command
 	if strings.ToLower(ce.Args[0]) == "reset" || strings.ToLower(ce.Args[0]) == "clear" {
+		oldTemp := meta.Temperature
 		meta.Temperature = nil
 		if err := ce.Portal.Save(ce.Ctx); err != nil {
+			meta.Temperature = oldTemp // Rollback in-memory state on save failure
 			ce.Reply("Failed to reset temperature: %v", err)
 			return
 		}
@@ -458,8 +472,10 @@ func (c *ClaudeConnector) cmdTemperature(ce *commands.Event) {
 		return
 	}
 
+	oldTemp := meta.Temperature
 	meta.Temperature = &temp
 	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		meta.Temperature = oldTemp // Rollback in-memory state on save failure
 		ce.Reply("Failed to save temperature: %v", err)
 		return
 	}

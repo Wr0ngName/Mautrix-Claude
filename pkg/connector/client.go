@@ -220,14 +220,24 @@ func (c *ClaudeClient) Disconnect() {
 // conversationCleanupLoop periodically cleans up expired conversations.
 func (c *ClaudeClient) conversationCleanupLoop() {
 	defer c.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			c.Connector.Log.Error().Interface("panic", r).Msg("Panic in conversation cleanup goroutine")
+		}
+	}()
 
 	maxAge := time.Duration(c.Connector.Config.ConversationMaxAge) * time.Hour
 	ticker := time.NewTicker(10 * time.Minute) // Check every 10 minutes
 	defer ticker.Stop()
 
+	c.Connector.Log.Debug().
+		Dur("max_age", maxAge).
+		Msg("Conversation cleanup loop started")
+
 	for {
 		select {
 		case <-c.ctx.Done():
+			c.Connector.Log.Debug().Msg("Conversation cleanup loop stopped")
 			return
 		case <-ticker.C:
 			c.cleanupExpiredConversations(maxAge)
@@ -367,14 +377,15 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		if msg.Content.Body == "" {
 			return nil, fmt.Errorf("empty message body")
 		}
+		// Validate message length to prevent abuse
+		if err := ValidateMessageLength(msg.Content.Body); err != nil {
+			return nil, err
+		}
 		messageContent = append(messageContent, claudeapi.Content{
 			Type: "text",
 			Text: msg.Content.Body,
 		})
 	}
-
-	// Add user message to history with Matrix event ID for tracking
-	convMgr.AddMessageWithContent("user", messageContent, userMsgID)
 
 	// Prepare API request - use portal-specific or connector defaults
 	model := meta.Model
@@ -389,9 +400,18 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		systemPrompt = c.Connector.Config.GetSystemPrompt()
 	}
 
+	// Build messages for API request: existing history + new user message
+	// Don't add to conversation history yet - only after successful API response
+	existingMessages := convMgr.GetMessages()
+	userMessage := claudeapi.Message{
+		Role:    "user",
+		Content: messageContent,
+	}
+	messagesForAPI := append(existingMessages, userMessage)
+
 	req := &claudeapi.CreateMessageRequest{
 		Model:       model,
-		Messages:    convMgr.GetMessages(),
+		Messages:    messagesForAPI,
 		MaxTokens:   c.Connector.Config.GetMaxTokens(),
 		Temperature: temperature,
 		System:      systemPrompt,
@@ -450,12 +470,15 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		claudeMessageID = fmt.Sprintf("msg_%d", time.Now().UnixNano())
 	}
 
-	// Add assistant response to conversation history
+	// Validate response content
 	responseContent := responseText.String()
 	if responseContent == "" {
 		return nil, fmt.Errorf("received empty response from Claude")
 	}
 
+	// Only add messages to conversation history AFTER successful API response
+	// This prevents conversation state corruption if API fails
+	convMgr.AddMessageWithContent("user", messageContent, userMsgID)
 	convMgr.AddMessageWithID("assistant", responseContent, claudeMessageID)
 
 	// Trim conversation if needed
@@ -468,10 +491,16 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				c.Connector.Log.Error().Interface("panic", r).Msg("Panic in assistant response goroutine")
+			}
+		}()
 
 		// Check if already shutting down before queuing
-		if c.ctx.Err() != nil {
-			c.Connector.Log.Debug().Msg("Skipping assistant response queue due to shutdown")
+		// Nil check for safety in case Connect() hasn't been called yet
+		if c.ctx == nil || c.ctx.Err() != nil {
+			c.Connector.Log.Debug().Msg("Skipping assistant response queue due to shutdown or nil context")
 			return
 		}
 		c.queueAssistantResponse(msg.Portal, responseContent, claudeMessageID, inputTokens+outputTokens)
@@ -514,11 +543,14 @@ func (c *ClaudeClient) formatUserFriendlyError(err error) error {
 	}
 
 	if claudeapi.IsInvalidRequestError(err) {
-		return fmt.Errorf("invalid request: %v", err)
+		// Don't leak full error details to user - log internally instead
+		c.Connector.Log.Debug().Err(err).Msg("Invalid request error details")
+		return fmt.Errorf("invalid request: please check your message and try again")
 	}
 
-	// Generic error
-	return fmt.Errorf("failed to send message to Claude: %w", err)
+	// Generic error - don't leak internal details to users
+	c.Connector.Log.Debug().Err(err).Msg("API error details")
+	return fmt.Errorf("failed to send message to Claude. Please try again later")
 }
 
 // queueAssistantResponse sends the assistant's message to the Matrix room.

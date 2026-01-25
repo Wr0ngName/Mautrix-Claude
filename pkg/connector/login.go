@@ -82,7 +82,7 @@ func (a *APIKeyLogin) SubmitUserInput(ctx context.Context, input map[string]stri
 		UserLogin:     userLogin,
 		Connector:     a.Connector,
 		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
-		rateLimiter:   NewRateLimiter(a.Connector.Config.RateLimitPerMinute),
+		rateLimiter:   NewRateLimiter(a.Connector.Config.GetRateLimitPerMinute()),
 	}
 	userLogin.Client = claudeClient
 

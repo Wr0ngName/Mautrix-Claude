@@ -3,6 +3,7 @@ package claudeapi
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type ModelCache struct {
 	models    []ModelInfo
 	byID      map[string]*ModelInfo
 	mu        sync.RWMutex
+	fetchMu   sync.Mutex // Prevents thundering herd on cache refresh
 	lastFetch time.Time
 	ttl       time.Duration
 }
@@ -60,6 +62,11 @@ func FetchModels(ctx context.Context, apiKey string) ([]ModelInfo, error) {
 
 	if err := pager.Err(); err != nil {
 		return nil, err
+	}
+
+	// Check for empty response - this could indicate API issues or invalid key
+	if len(allModels) == 0 {
+		return nil, fmt.Errorf("no models returned from API - check API key permissions")
 	}
 
 	// Update global cache
@@ -162,11 +169,23 @@ func (c *ModelCache) IsEmpty() bool {
 }
 
 // GetCachedModels returns cached models, fetching from API if cache is empty or stale.
+// Uses double-checked locking to prevent thundering herd on cache refresh.
 func GetCachedModels(ctx context.Context, apiKey string) ([]ModelInfo, error) {
-	if globalModelCache.IsEmpty() || globalModelCache.IsStale() {
-		return FetchModels(ctx, apiKey)
+	// First check without fetch lock (fast path)
+	if !globalModelCache.IsEmpty() && !globalModelCache.IsStale() {
+		return globalModelCache.GetAll(), nil
 	}
-	return globalModelCache.GetAll(), nil
+
+	// Acquire fetch lock to prevent multiple concurrent fetches
+	globalModelCache.fetchMu.Lock()
+	defer globalModelCache.fetchMu.Unlock()
+
+	// Double-check after acquiring lock (another goroutine may have refreshed)
+	if !globalModelCache.IsEmpty() && !globalModelCache.IsStale() {
+		return globalModelCache.GetAll(), nil
+	}
+
+	return FetchModels(ctx, apiKey)
 }
 
 // GetCachedModelInfo returns cached model info by ID.
