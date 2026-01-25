@@ -93,6 +93,18 @@ func (c *ClaudeConnector) RegisterCommands(proc *commands.Processor) {
 			RequiresLogin:  true,
 			RequiresPortal: true,
 		},
+		&commands.FullHandler{
+			Func:    c.cmdMention,
+			Name:    "mention",
+			Aliases: []string{"mentions", "mention-only"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "Toggle mention-only mode (Claude only responds when @mentioned)",
+				Args:        "[on|off]",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: true,
+		},
 	)
 }
 
@@ -449,6 +461,59 @@ func (c *ClaudeConnector) cmdSystem(ce *commands.Event) {
 	}
 
 	ce.Reply("System prompt updated.")
+}
+
+// cmdMention toggles mention-only mode.
+func (c *ClaudeConnector) cmdMention(ce *commands.Event) {
+	if ce.Portal == nil {
+		ce.Reply("This command must be run in a Claude conversation room.")
+		return
+	}
+
+	meta, ok := ce.Portal.Metadata.(*PortalMetadata)
+	if !ok || meta == nil {
+		ce.Reply("Failed to get room metadata.")
+		return
+	}
+
+	// If no argument, show current status
+	if len(ce.Args) == 0 {
+		if meta.MentionOnly {
+			ce.Reply("**Mention-only mode:** ON\n\nClaude only responds when @mentioned.\n\nUse `mention off` to respond to all messages.")
+		} else {
+			ce.Reply("**Mention-only mode:** OFF\n\nClaude responds to all messages.\n\nUse `mention on` to only respond when @mentioned.")
+		}
+		return
+	}
+
+	// Parse argument
+	arg := strings.ToLower(ce.Args[0])
+	var newValue bool
+	switch arg {
+	case "on", "true", "yes", "1", "enable", "enabled":
+		newValue = true
+	case "off", "false", "no", "0", "disable", "disabled":
+		newValue = false
+	case "toggle":
+		newValue = !meta.MentionOnly
+	default:
+		ce.Reply("Invalid argument. Use `mention on`, `mention off`, or `mention toggle`.")
+		return
+	}
+
+	oldValue := meta.MentionOnly
+	meta.MentionOnly = newValue
+	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		meta.MentionOnly = oldValue
+		ce.Reply("Failed to save setting: %v", err)
+		return
+	}
+
+	if newValue {
+		ce.Reply("Mention-only mode **enabled**. Claude will only respond when @mentioned.")
+	} else {
+		ce.Reply("Mention-only mode **disabled**. Claude will respond to all messages.")
+	}
 }
 
 // cmdJoin adds Claude to the current room by creating a bridge portal.

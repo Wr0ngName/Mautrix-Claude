@@ -302,6 +302,40 @@ func (c *ClaudeClient) IsThisUser(ctx context.Context, userID networkid.UserID) 
 	return false
 }
 
+// isClaudeMentioned checks if the Claude ghost is mentioned in the message.
+func (c *ClaudeClient) isClaudeMentioned(msg *bridgev2.MatrixMessage) bool {
+	// Check formatted body for mentions (HTML format)
+	if msg.Content.FormattedBody != "" {
+		// Look for mention pill: <a href="https://matrix.to/#/@claude_
+		if strings.Contains(msg.Content.FormattedBody, "/@claude_") {
+			return true
+		}
+		// Also check for the ghost's MXID directly
+		model := c.Connector.Config.GetDefaultModel()
+		if meta, ok := msg.Portal.Metadata.(*PortalMetadata); ok && meta != nil && meta.Model != "" {
+			model = meta.Model
+		}
+		ghostID := MakeClaudeGhostID(model)
+		ghostMXID := fmt.Sprintf("@claude_%s:", ghostID)
+		if strings.Contains(msg.Content.FormattedBody, ghostMXID) {
+			return true
+		}
+	}
+
+	// Check plain text body for @claude mentions
+	body := strings.ToLower(msg.Content.Body)
+	if strings.Contains(body, "@claude") {
+		return true
+	}
+
+	// Check for display name mentions (case insensitive)
+	if strings.Contains(body, "claude") && (strings.HasPrefix(body, "claude") || strings.Contains(body, " claude") || strings.Contains(body, "@claude")) {
+		return true
+	}
+
+	return false
+}
+
 // getConversationManager gets or creates a conversation manager for a portal.
 func (c *ClaudeClient) getConversationManager(portal *bridgev2.Portal) *claudeapi.ConversationManager {
 	c.convMu.Lock()
@@ -339,7 +373,17 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		Str("sender", string(msg.Event.Sender)).
 		Str("msg_type", string(msg.Content.MsgType)).
 		Str("body", bodyPreview).
+		Bool("mention_only", meta.MentionOnly).
 		Msg("Handling Matrix message")
+
+	// Check mention-only mode
+	if meta.MentionOnly {
+		if !c.isClaudeMentioned(msg) {
+			c.Connector.Log.Debug().Msg("Mention-only mode: Claude not mentioned, ignoring message")
+			return nil, nil
+		}
+		c.Connector.Log.Debug().Msg("Mention-only mode: Claude mentioned, processing message")
+	}
 
 	// Check rate limit before processing
 	if !c.rateLimiter.Allow() {
