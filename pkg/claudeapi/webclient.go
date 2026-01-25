@@ -26,6 +26,9 @@ type WebClient struct {
 	Log            zerolog.Logger
 	Metrics        *Metrics
 	RetryConfig    RetryConfig
+	// AllCookies contains all cookies needed for authentication (sessionKey + cf_clearance etc.)
+	// If set, this is used instead of just SessionKey
+	AllCookies string
 }
 
 // Ensure WebClient implements MessageClient interface.
@@ -498,8 +501,25 @@ func (c *WebClient) GetClientType() string {
 func (c *WebClient) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", c.SessionKey))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Origin", "https://claude.ai")
+	req.Header.Set("Referer", "https://claude.ai/")
+
+	// Use full cookie string if provided, otherwise just sessionKey
+	if c.AllCookies != "" {
+		req.Header.Set("Cookie", c.AllCookies)
+	} else {
+		req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", c.SessionKey))
+	}
+
+	// Use a recent Chrome user agent
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Sec-Ch-Ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 }
 
 // fetchOrganizationID fetches and stores the organization ID.

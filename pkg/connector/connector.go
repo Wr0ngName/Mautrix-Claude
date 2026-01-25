@@ -4,6 +4,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
@@ -140,7 +141,17 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		if metadata.SessionKey == "" {
 			return fmt.Errorf("no stored session cookie")
 		}
-		webClient := claudeapi.NewWebClient(metadata.SessionKey, log)
+		// SessionKey may store full cookie string (with cf_clearance etc.)
+		sessionKey := extractSessionKeyFromCookies(metadata.SessionKey)
+		if sessionKey == "" {
+			// Backwards compatibility: SessionKey might be just the key value
+			sessionKey = metadata.SessionKey
+		}
+		webClient := claudeapi.NewWebClient(sessionKey, log)
+		// If the stored value contains semicolons, it's the full cookie string
+		if strings.Contains(metadata.SessionKey, ";") {
+			webClient.AllCookies = metadata.SessionKey
+		}
 		if metadata.OrganizationID != "" {
 			webClient.OrganizationID = metadata.OrganizationID
 		}
@@ -236,4 +247,15 @@ func MakeClaudePortalKey(conversationID string) networkid.PortalKey {
 // MakeClaudeMessageID creates a message ID from a Claude message ID.
 func MakeClaudeMessageID(messageID string) networkid.MessageID {
 	return networkid.MessageID(messageID)
+}
+
+// extractSessionKeyFromCookies extracts the sessionKey value from a cookie string.
+func extractSessionKeyFromCookies(cookies string) string {
+	for _, part := range strings.Split(cookies, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "sessionKey=") {
+			return strings.TrimPrefix(part, "sessionKey=")
+		}
+	}
+	return ""
 }

@@ -129,16 +129,26 @@ func isValidAPIKeyFormat(apiKey string) bool {
 // Start begins the session cookie login flow.
 func (s *SessionCookieLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	return &bridgev2.LoginStep{
-		Type:         bridgev2.LoginStepTypeUserInput,
-		StepID:       "session_cookie",
-		Instructions: "Enter your Claude session cookie. Get it from claude.ai (F12 > Application > Cookies > sessionKey)",
+		Type:   bridgev2.LoginStepTypeUserInput,
+		StepID: "session_cookie",
+		Instructions: `Enter your Claude cookies. Due to Cloudflare protection, you need ALL cookies.
+
+How to get cookies:
+1. Open claude.ai in Chrome/Firefox
+2. Press F12 → Network tab
+3. Refresh the page
+4. Click any request to claude.ai
+5. Find "Cookie:" in Request Headers
+6. Copy the ENTIRE cookie string
+
+It should look like: sessionKey=sk-ant-...; cf_clearance=...; __cf_bm=...`,
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
 					Type:        bridgev2.LoginInputFieldTypePassword,
-					ID:          "session_key",
-					Name:        "Session Key",
-					Description: "Your claude.ai sessionKey cookie value",
+					ID:          "cookies",
+					Name:        "All Cookies",
+					Description: "Full cookie string from browser (includes sessionKey, cf_clearance, etc.)",
 				},
 			},
 		},
@@ -147,15 +157,22 @@ func (s *SessionCookieLogin) Start(ctx context.Context) (*bridgev2.LoginStep, er
 
 // SubmitUserInput processes the submitted session cookie.
 func (s *SessionCookieLogin) SubmitUserInput(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
-	sessionKey := strings.TrimSpace(input["session_key"])
+	cookies := strings.TrimSpace(input["cookies"])
 
-	// Validate session key is not empty
-	if sessionKey == "" {
-		return nil, fmt.Errorf("session key cannot be empty")
+	// Validate cookies are not empty
+	if cookies == "" {
+		return nil, fmt.Errorf("cookies cannot be empty")
 	}
 
-	// Create web client and validate
+	// Extract sessionKey from cookies for the client
+	sessionKey := extractSessionKey(cookies)
+	if sessionKey == "" {
+		return nil, fmt.Errorf("sessionKey not found in cookies. Make sure you copied the full cookie string")
+	}
+
+	// Create web client with full cookies and validate
 	client := claudeapi.NewWebClient(sessionKey, s.Connector.Log)
+	client.AllCookies = cookies
 	if err := client.Validate(ctx); err != nil {
 		return nil, fmt.Errorf("invalid session cookie: %w", err)
 	}
@@ -168,7 +185,7 @@ func (s *SessionCookieLogin) SubmitUserInput(ctx context.Context, input map[stri
 		RemoteName: "Claude Web User",
 		Metadata: &UserLoginMetadata{
 			AuthType:       "session_cookie",
-			SessionKey:     sessionKey,
+			SessionKey:     cookies, // Store full cookies
 			OrganizationID: client.OrganizationID,
 		},
 	}, nil)
@@ -193,6 +210,17 @@ func (s *SessionCookieLogin) SubmitUserInput(ctx context.Context, input map[stri
 			UserLogin: userLogin,
 		},
 	}, nil
+}
+
+// extractSessionKey extracts the sessionKey value from a cookie string.
+func extractSessionKey(cookies string) string {
+	for _, part := range strings.Split(cookies, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "sessionKey=") {
+			return strings.TrimPrefix(part, "sessionKey=")
+		}
+	}
+	return ""
 }
 
 // Cancel cancels the login process.
