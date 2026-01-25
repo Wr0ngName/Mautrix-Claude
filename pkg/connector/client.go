@@ -518,6 +518,13 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 
 	ghostID := MakeClaudeGhostID(model)
 
+	// Get or create the ghost via the bridge (this ensures the ghost exists and has an Intent)
+	ghost, err := c.Connector.br.GetGhostByID(ctx, ghostID)
+	if err != nil {
+		c.Connector.Log.Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to get ghost")
+		return nil, fmt.Errorf("failed to get ghost: %w", err)
+	}
+
 	// Get or create ghost info
 	displayName := fmt.Sprintf("Claude (%s)", model)
 	if info := claudeapi.GetModelInfo(model); info != nil {
@@ -531,7 +538,11 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 		Identifiers: []string{fmt.Sprintf("claude:%s", model)},
 	}
 
+	// Update ghost info
+	ghost.UpdateInfo(ctx, userInfo)
+
 	resp := &bridgev2.ResolveIdentifierResponse{
+		Ghost:    ghost,
 		UserID:   ghostID,
 		UserInfo: userInfo,
 	}
@@ -545,14 +556,24 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 		roomType := database.RoomTypeDM
 		chatName := fmt.Sprintf("Conversation with %s", displayName)
 
+		// Member list must include BOTH the user (IsFromMe=true) and the ghost (IsFromMe=false)
+		// This ensures the user gets invited to the room
 		resp.Chat = &bridgev2.CreateChatResponse{
 			PortalKey: portalKey,
 			PortalInfo: &bridgev2.ChatInfo{
 				Name: &chatName,
 				Members: &bridgev2.ChatMemberList{
-					IsFull: true,
+					IsFull:      true,
+					OtherUserID: ghostID, // Set the ghost as the "other user" in this DM
 					Members: []bridgev2.ChatMember{
 						{
+							// The user who is starting the chat - they will be invited
+							EventSender: bridgev2.EventSender{
+								IsFromMe: true,
+							},
+						},
+						{
+							// The Claude ghost
 							EventSender: bridgev2.EventSender{
 								IsFromMe: false,
 								Sender:   ghostID,
@@ -576,6 +597,7 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 			Str("identifier", identifier).
 			Str("model", model).
 			Str("conversation_id", conversationID).
+			Str("ghost_mxid", ghost.Intent.GetMXID().String()).
 			Msg("Created new chat")
 	}
 
