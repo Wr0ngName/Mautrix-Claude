@@ -1,0 +1,400 @@
+package connector
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"go.mau.fi/mautrix-claude/pkg/claudeapi"
+	"maunium.net/go/mautrix/bridgev2/commands"
+)
+
+// RegisterCommands registers custom commands for the Claude AI bridge.
+func (c *ClaudeConnector) RegisterCommands(proc *commands.Processor) {
+	proc.AddHandlers(
+		&commands.FullHandler{
+			Func:    c.cmdModel,
+			Name:    "model",
+			Aliases: []string{"set-model", "switch-model"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "View or change the Claude model for this conversation",
+				Args:        "[model-name]",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: true,
+		},
+		&commands.FullHandler{
+			Func:    c.cmdModels,
+			Name:    "models",
+			Aliases: []string{"list-models"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "List available Claude models",
+			},
+			RequiresLogin: true,
+		},
+		&commands.FullHandler{
+			Func:    c.cmdClear,
+			Name:    "clear",
+			Aliases: []string{"reset", "clear-context"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "Clear the conversation history/context for this room",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: true,
+		},
+		&commands.FullHandler{
+			Func:    c.cmdStats,
+			Name:    "stats",
+			Aliases: []string{"info", "status"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "Show conversation statistics for this room",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: true,
+		},
+		&commands.FullHandler{
+			Func:    c.cmdSystem,
+			Name:    "system",
+			Aliases: []string{"set-system", "system-prompt"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "View or set the system prompt for this conversation",
+				Args:        "[prompt]",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: true,
+		},
+		&commands.FullHandler{
+			Func:    c.cmdTemperature,
+			Name:    "temperature",
+			Aliases: []string{"temp", "set-temp"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "View or set the temperature (0-1) for this conversation",
+				Args:        "[value]",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: true,
+		},
+	)
+}
+
+// cmdModel views or changes the Claude model for a conversation.
+func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
+	if ce.Portal == nil {
+		ce.Reply("This command must be run in a Claude conversation room.")
+		return
+	}
+
+	meta, ok := ce.Portal.Metadata.(*PortalMetadata)
+	if !ok || meta == nil {
+		ce.Reply("Failed to get room metadata.")
+		return
+	}
+
+	// If no argument, show current model
+	if len(ce.Args) == 0 {
+		currentModel := meta.Model
+		if currentModel == "" {
+			currentModel = c.Config.GetDefaultModel()
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("**Current model:** `%s`\n\n", currentModel))
+
+		if info := claudeapi.GetModelInfo(currentModel); info != nil {
+			sb.WriteString(fmt.Sprintf("**Name:** %s\n", info.Name))
+			sb.WriteString(fmt.Sprintf("**Max input tokens:** %d\n", info.MaxInputTokens))
+			sb.WriteString(fmt.Sprintf("**Max output tokens:** %d\n", info.MaxOutputTokens))
+		}
+
+		sb.WriteString("\nUse `model <name>` to change. Run `models` to see available options.")
+		ce.Reply(sb.String())
+		return
+	}
+
+	// Set new model
+	newModel := strings.ToLower(strings.Join(ce.Args, "-"))
+
+	// Map friendly names to full model names
+	switch newModel {
+	case "opus", "opus-4.5", "opus-4-5":
+		newModel = claudeapi.ModelOpus4_5
+	case "sonnet", "sonnet-4.5", "sonnet-4-5":
+		newModel = claudeapi.ModelSonnet4_5
+	case "sonnet-3.5", "sonnet-3-5":
+		newModel = claudeapi.ModelSonnet3_5
+	case "haiku", "haiku-3.5", "haiku-3-5":
+		newModel = claudeapi.ModelHaiku3_5
+	case "opus-3", "opus-3.0":
+		newModel = claudeapi.ModelOpus3
+	}
+
+	// Validate the model
+	if !claudeapi.ValidateModel(newModel) {
+		ce.Reply("Unknown model: `%s`\n\nRun `models` to see available options.", newModel)
+		return
+	}
+
+	// Update portal metadata
+	meta.Model = newModel
+	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		ce.Reply("Failed to save model change: %v", err)
+		return
+	}
+
+	info := claudeapi.GetModelInfo(newModel)
+	if info != nil {
+		ce.Reply("Model changed to **%s** (`%s`)", info.Name, newModel)
+	} else {
+		ce.Reply("Model changed to `%s`", newModel)
+	}
+}
+
+// cmdModels lists available Claude models.
+func (c *ClaudeConnector) cmdModels(ce *commands.Event) {
+	var sb strings.Builder
+	sb.WriteString("**Available Claude Models:**\n\n")
+
+	defaultModel := c.Config.GetDefaultModel()
+
+	for _, model := range claudeapi.ValidModels {
+		info := claudeapi.GetModelInfo(model)
+		if info != nil {
+			isDefault := ""
+			if model == defaultModel {
+				isDefault = " (default)"
+			}
+			sb.WriteString(fmt.Sprintf("• **%s**%s\n", info.Name, isDefault))
+			sb.WriteString(fmt.Sprintf("  `%s`\n", model))
+			sb.WriteString(fmt.Sprintf("  Input: %dk tokens, Output: %dk tokens\n\n",
+				info.MaxInputTokens/1000, info.MaxOutputTokens/1000))
+		} else {
+			sb.WriteString(fmt.Sprintf("• `%s`\n", model))
+		}
+	}
+
+	sb.WriteString("Use `model <name>` to switch models in a conversation room.\n")
+	sb.WriteString("Shortcuts: `opus`, `sonnet`, `haiku`")
+
+	ce.Reply(sb.String())
+}
+
+// cmdClear clears the conversation history.
+func (c *ClaudeConnector) cmdClear(ce *commands.Event) {
+	if ce.Portal == nil {
+		ce.Reply("This command must be run in a Claude conversation room.")
+		return
+	}
+
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		ce.Reply("You are not logged in.")
+		return
+	}
+
+	client, ok := login.Client.(*ClaudeClient)
+	if !ok || client == nil {
+		ce.Reply("Failed to get client.")
+		return
+	}
+
+	// Get stats before clearing
+	msgCount, tokens, _ := client.GetConversationStats(ce.Portal.PortalKey.ID)
+
+	// Clear the conversation
+	client.ClearConversation(ce.Portal.PortalKey.ID)
+
+	ce.Reply("Conversation cleared. Removed %d messages (~%d tokens).", msgCount, tokens)
+}
+
+// cmdStats shows conversation statistics.
+func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
+	if ce.Portal == nil {
+		ce.Reply("This command must be run in a Claude conversation room.")
+		return
+	}
+
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		ce.Reply("You are not logged in.")
+		return
+	}
+
+	client, ok := login.Client.(*ClaudeClient)
+	if !ok || client == nil {
+		ce.Reply("Failed to get client.")
+		return
+	}
+
+	meta, _ := ce.Portal.Metadata.(*PortalMetadata)
+
+	// Get conversation stats
+	msgCount, estimatedTokens, lastUsed := client.GetConversationStats(ce.Portal.PortalKey.ID)
+
+	var sb strings.Builder
+	sb.WriteString("**Conversation Statistics:**\n\n")
+
+	// Model info
+	model := c.Config.GetDefaultModel()
+	if meta != nil && meta.Model != "" {
+		model = meta.Model
+	}
+	if info := claudeapi.GetModelInfo(model); info != nil {
+		sb.WriteString(fmt.Sprintf("**Model:** %s (`%s`)\n", info.Name, model))
+	} else {
+		sb.WriteString(fmt.Sprintf("**Model:** `%s`\n", model))
+	}
+
+	// Conversation stats
+	sb.WriteString(fmt.Sprintf("**Messages in context:** %d\n", msgCount))
+	sb.WriteString(fmt.Sprintf("**Estimated tokens:** ~%d\n", estimatedTokens))
+
+	if !lastUsed.IsZero() {
+		sb.WriteString(fmt.Sprintf("**Last active:** %s ago\n", time.Since(lastUsed).Round(time.Second)))
+	}
+
+	// System prompt info
+	if meta != nil && meta.SystemPrompt != "" {
+		promptPreview := meta.SystemPrompt
+		if len(promptPreview) > 100 {
+			promptPreview = promptPreview[:97] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("**Custom system prompt:** %s\n", promptPreview))
+	}
+
+	// Temperature info
+	if meta != nil && meta.Temperature != nil {
+		sb.WriteString(fmt.Sprintf("**Temperature:** %.2f\n", *meta.Temperature))
+	} else {
+		sb.WriteString(fmt.Sprintf("**Temperature:** %.2f (default)\n", c.Config.GetTemperature()))
+	}
+
+	// API metrics
+	if metrics := client.GetMetrics(); metrics != nil {
+		totalReqs := metrics.TotalRequests.Load()
+		failedReqs := metrics.FailedRequests.Load()
+		inputTokens := metrics.TotalInputTokens.Load()
+		outputTokens := metrics.TotalOutputTokens.Load()
+
+		sb.WriteString(fmt.Sprintf("\n**API Stats (this session):**\n"))
+		sb.WriteString(fmt.Sprintf("• Requests: %d (%d failed)\n", totalReqs, failedReqs))
+		sb.WriteString(fmt.Sprintf("• Total tokens: %d (in: %d, out: %d)\n",
+			inputTokens+outputTokens, inputTokens, outputTokens))
+		if avgDuration := metrics.GetAverageRequestDuration(); avgDuration > 0 {
+			sb.WriteString(fmt.Sprintf("• Avg response time: %s\n", avgDuration.Round(time.Millisecond)))
+		}
+	}
+
+	ce.Reply(sb.String())
+}
+
+// cmdSystem views or sets the system prompt.
+func (c *ClaudeConnector) cmdSystem(ce *commands.Event) {
+	if ce.Portal == nil {
+		ce.Reply("This command must be run in a Claude conversation room.")
+		return
+	}
+
+	meta, ok := ce.Portal.Metadata.(*PortalMetadata)
+	if !ok || meta == nil {
+		ce.Reply("Failed to get room metadata.")
+		return
+	}
+
+	// If no argument, show current system prompt
+	if len(ce.Args) == 0 {
+		currentPrompt := meta.SystemPrompt
+		if currentPrompt == "" {
+			currentPrompt = c.Config.GetSystemPrompt()
+			if currentPrompt == "" {
+				ce.Reply("No system prompt is set. Use `system <prompt>` to set one.")
+			} else {
+				ce.Reply("**Current system prompt (default):**\n\n%s", currentPrompt)
+			}
+		} else {
+			ce.Reply("**Current system prompt:**\n\n%s\n\nUse `system clear` to reset to default.", currentPrompt)
+		}
+		return
+	}
+
+	// Check for clear command
+	if strings.ToLower(ce.Args[0]) == "clear" {
+		meta.SystemPrompt = ""
+		if err := ce.Portal.Save(ce.Ctx); err != nil {
+			ce.Reply("Failed to clear system prompt: %v", err)
+			return
+		}
+		ce.Reply("System prompt cleared. Using default.")
+		return
+	}
+
+	// Set new system prompt
+	newPrompt := strings.Join(ce.Args, " ")
+	meta.SystemPrompt = newPrompt
+	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		ce.Reply("Failed to save system prompt: %v", err)
+		return
+	}
+
+	ce.Reply("System prompt updated.")
+}
+
+// cmdTemperature views or sets the temperature.
+func (c *ClaudeConnector) cmdTemperature(ce *commands.Event) {
+	if ce.Portal == nil {
+		ce.Reply("This command must be run in a Claude conversation room.")
+		return
+	}
+
+	meta, ok := ce.Portal.Metadata.(*PortalMetadata)
+	if !ok || meta == nil {
+		ce.Reply("Failed to get room metadata.")
+		return
+	}
+
+	// If no argument, show current temperature
+	if len(ce.Args) == 0 {
+		if meta.Temperature != nil {
+			ce.Reply("**Current temperature:** %.2f\n\nUse `temperature <0-1>` to change, or `temperature reset` to use default.", *meta.Temperature)
+		} else {
+			ce.Reply("**Current temperature:** %.2f (default)\n\nUse `temperature <0-1>` to change.", c.Config.GetTemperature())
+		}
+		return
+	}
+
+	// Check for reset command
+	if strings.ToLower(ce.Args[0]) == "reset" || strings.ToLower(ce.Args[0]) == "clear" {
+		meta.Temperature = nil
+		if err := ce.Portal.Save(ce.Ctx); err != nil {
+			ce.Reply("Failed to reset temperature: %v", err)
+			return
+		}
+		ce.Reply("Temperature reset to default (%.2f).", c.Config.GetTemperature())
+		return
+	}
+
+	// Parse temperature value
+	var temp float64
+	if _, err := fmt.Sscanf(ce.Args[0], "%f", &temp); err != nil {
+		ce.Reply("Invalid temperature value. Use a number between 0 and 1.")
+		return
+	}
+
+	if temp < 0 || temp > 1 {
+		ce.Reply("Temperature must be between 0 and 1.")
+		return
+	}
+
+	meta.Temperature = &temp
+	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		ce.Reply("Failed to save temperature: %v", err)
+		return
+	}
+
+	ce.Reply("Temperature set to %.2f.", temp)
+}

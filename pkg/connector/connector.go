@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
@@ -41,6 +42,13 @@ func (c *ClaudeConnector) Init(bridge *bridgev2.Bridge) {
 // Start starts the connector.
 func (c *ClaudeConnector) Start(ctx context.Context) error {
 	c.Log.Info().Msg("Claude API connector starting")
+
+	// Register custom commands
+	if proc, ok := c.br.Commands.(*commands.Processor); ok {
+		c.RegisterCommands(proc)
+		c.Log.Debug().Msg("Registered custom bridge commands")
+	}
+
 	return nil
 }
 
