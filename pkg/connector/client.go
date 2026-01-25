@@ -33,7 +33,10 @@ type ClaudeClient struct {
 	cancel context.CancelFunc
 }
 
-var _ bridgev2.NetworkAPI = (*ClaudeClient)(nil)
+var (
+	_ bridgev2.NetworkAPI                     = (*ClaudeClient)(nil)
+	_ bridgev2.IdentifierResolvingNetworkAPI = (*ClaudeClient)(nil)
+)
 
 // Connect is called when the client should connect.
 func (c *ClaudeClient) Connect(ctx context.Context) {
@@ -495,4 +498,115 @@ func (c *ClaudeClient) GetConversationStats(portalID networkid.PortalID) (messag
 		return cm.MessageCount(), cm.EstimatedTokens(), cm.LastUsedAt()
 	}
 	return 0, 0, time.Time{}
+}
+
+// ResolveIdentifier resolves an identifier to start a new chat.
+// Supported identifiers: "claude", "opus", "sonnet", "haiku", or full model names.
+func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string, createChat bool) (*bridgev2.ResolveIdentifierResponse, error) {
+	// Parse identifier to determine the model
+	model := c.parseModelIdentifier(identifier)
+	if model == "" {
+		return nil, fmt.Errorf("unknown identifier: %s (try 'opus', 'sonnet', 'haiku', or a full model name)", identifier)
+	}
+
+	ghostID := MakeClaudeGhostID(model)
+
+	// Get or create ghost info
+	displayName := fmt.Sprintf("Claude (%s)", model)
+	if info := claudeapi.GetModelInfo(model); info != nil {
+		displayName = info.Name
+	}
+	isBot := true
+
+	userInfo := &bridgev2.UserInfo{
+		Name:        &displayName,
+		IsBot:       &isBot,
+		Identifiers: []string{fmt.Sprintf("claude:%s", model)},
+	}
+
+	resp := &bridgev2.ResolveIdentifierResponse{
+		UserID:   ghostID,
+		UserInfo: userInfo,
+	}
+
+	// If createChat is requested, create the portal
+	if createChat {
+		// Generate a unique conversation ID
+		conversationID := fmt.Sprintf("conv_%s_%d", claudeapi.GetModelFamily(model), time.Now().UnixNano())
+		portalKey := MakeClaudePortalKey(conversationID)
+
+		roomType := database.RoomTypeDM
+		chatName := fmt.Sprintf("Conversation with %s", displayName)
+
+		resp.Chat = &bridgev2.CreateChatResponse{
+			PortalKey: portalKey,
+			PortalInfo: &bridgev2.ChatInfo{
+				Name: &chatName,
+				Members: &bridgev2.ChatMemberList{
+					IsFull: true,
+					Members: []bridgev2.ChatMember{
+						{
+							EventSender: bridgev2.EventSender{
+								IsFromMe: false,
+								Sender:   ghostID,
+							},
+						},
+					},
+				},
+				Type: &roomType,
+			},
+		}
+
+		// Store portal metadata for later use
+		if portal, err := c.Connector.br.GetPortalByKey(ctx, portalKey); err == nil && portal != nil {
+			portal.Metadata = &PortalMetadata{
+				ConversationName: chatName,
+				Model:            model,
+			}
+		}
+
+		c.Connector.Log.Info().
+			Str("identifier", identifier).
+			Str("model", model).
+			Str("conversation_id", conversationID).
+			Msg("Created new chat")
+	}
+
+	return resp, nil
+}
+
+// parseModelIdentifier parses an identifier and returns the full model name.
+func (c *ClaudeClient) parseModelIdentifier(identifier string) string {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
+
+	// Direct match with known models
+	if claudeapi.ValidateModel(identifier) {
+		return identifier
+	}
+
+	// Map friendly names to model families
+	switch identifier {
+	case "claude", "sonnet", "claude-sonnet":
+		return c.Connector.Config.GetDefaultModel()
+	case "opus", "claude-opus":
+		return claudeapi.ModelOpus4_5
+	case "haiku", "claude-haiku":
+		return claudeapi.ModelHaiku3_5
+	}
+
+	// Check if it's a model family name (e.g., "claude_opus" ghost ID format)
+	if strings.HasPrefix(identifier, "claude_") {
+		family := strings.TrimPrefix(identifier, "claude_")
+		switch family {
+		case "opus":
+			return claudeapi.ModelOpus4_5
+		case "sonnet":
+			return c.Connector.Config.GetDefaultModel()
+		case "haiku":
+			return claudeapi.ModelHaiku3_5
+		}
+	}
+
+	// No match found
+	return ""
 }
