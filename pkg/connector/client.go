@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -345,7 +346,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		c.Connector.Log.Warn().
 			Dur("wait_time", waitTime).
 			Msg("Rate limited, rejecting message")
-		return nil, fmt.Errorf("rate limit exceeded. Please wait %s before sending another message", waitTime.Round(time.Second))
+		errMsg := fmt.Sprintf("Rate limit exceeded. Please wait %s before sending another message.", waitTime.Round(time.Second))
+		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	// Get or create conversation manager for this portal
@@ -362,7 +365,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		imageContent, err := c.downloadAndEncodeImage(ctx, msg.Content)
 		if err != nil {
 			c.Connector.Log.Warn().Err(err).Msg("Failed to process image")
-			return nil, fmt.Errorf("failed to process image: %w", err)
+			errMsg := fmt.Sprintf("Failed to process image: %v", err)
+			c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+			return nil, fmt.Errorf("%s", errMsg)
 		}
 		messageContent = append(messageContent, *imageContent)
 
@@ -410,13 +415,17 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		family := GetModelFamilyName(model)
 		apiKey := c.getAPIKey()
 		if apiKey == "" {
-			return nil, fmt.Errorf("no API key configured")
+			errMsg := "No API key configured"
+			c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+			return nil, errors.New(errMsg)
 		}
 
 		resolvedModel, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, family)
 		if err != nil {
 			c.Connector.Log.Error().Err(err).Str("family", family).Msg("Failed to resolve model family")
-			return nil, fmt.Errorf("failed to resolve model '%s': %v", model, err)
+			errMsg := fmt.Sprintf("Failed to resolve model '%s': %v", model, err)
+			c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+			return nil, errors.New(errMsg)
 		}
 		c.Connector.Log.Debug().
 			Str("family", family).
@@ -454,10 +463,14 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	stream, err := c.MessageClient.CreateMessageStream(ctx, req)
 	if err != nil {
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")
-		return nil, c.formatUserFriendlyError(err)
+		friendlyErr := c.formatUserFriendlyError(err)
+		c.sendErrorToRoom(ctx, msg.Portal, friendlyErr.Error())
+		return nil, friendlyErr
 	}
 	if stream == nil {
-		return nil, fmt.Errorf("received nil stream from Claude API")
+		errMsg := "received nil stream from Claude API"
+		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	// Collect response
@@ -495,7 +508,10 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	// Check for streaming errors
 	if streamError != nil {
-		return nil, streamError
+		// Format user-friendly and send error to Matrix room
+		friendlyErr := c.formatUserFriendlyError(streamError)
+		c.sendErrorToRoom(ctx, msg.Portal, friendlyErr.Error())
+		return nil, friendlyErr
 	}
 
 	if claudeMessageID == "" {
@@ -505,7 +521,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	// Validate response content
 	responseContent := responseText.String()
 	if responseContent == "" {
-		return nil, fmt.Errorf("received empty response from Claude")
+		errMsg := "received empty response from Claude"
+		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	// Only add messages to conversation history AFTER successful API response
@@ -583,6 +601,43 @@ func (c *ClaudeClient) formatUserFriendlyError(err error) error {
 	// Generic error - don't leak internal details to users
 	c.Connector.Log.Debug().Err(err).Msg("API error details")
 	return fmt.Errorf("failed to send message to Claude. Please try again later")
+}
+
+// sendErrorToRoom sends an error message to the Matrix room so the user knows what happened.
+func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Portal, errorMsg string) {
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+
+	// Create a notice message for the error
+	c.UserLogin.QueueRemoteEvent(&simplevent.Message[*MessageMetadata]{
+		EventMeta: simplevent.EventMeta{
+			Type: bridgev2.RemoteEventMessage,
+			LogContext: func(lc zerolog.Context) zerolog.Context {
+				return lc.Str("error_notice", "true")
+			},
+			PortalKey: portal.PortalKey,
+			Sender:    bridgev2.EventSender{Sender: MakeClaudeGhostID("error")},
+			Timestamp: time.Now(),
+		},
+		ID: networkid.MessageID(fmt.Sprintf("error_%d", time.Now().UnixNano())),
+		Data: &MessageMetadata{
+			ClaudeMessageID: "error",
+		},
+		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
+			return &bridgev2.ConvertedMessage{
+				Parts: []*bridgev2.ConvertedMessagePart{
+					{
+						Type: event.EventMessage,
+						Content: &event.MessageEventContent{
+							MsgType: event.MsgNotice,
+							Body:    "⚠️ " + errorMsg,
+						},
+					},
+				},
+			}, nil
+		},
+	})
 }
 
 // queueAssistantResponse sends the assistant's message to the Matrix room.
