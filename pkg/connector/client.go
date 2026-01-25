@@ -282,6 +282,18 @@ func (c *ClaudeClient) LogoutRemote(ctx context.Context) {
 	// API keys don't need remote logout
 }
 
+// getAPIKey returns the API key from the user login metadata.
+func (c *ClaudeClient) getAPIKey() string {
+	if c.UserLogin == nil {
+		return ""
+	}
+	meta, ok := c.UserLogin.Metadata.(*UserLoginMetadata)
+	if !ok || meta == nil {
+		return ""
+	}
+	return meta.APIKey
+}
+
 // IsThisUser checks if a user ID belongs to this logged-in user.
 func (c *ClaudeClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {
 	// All Claude ghosts belong to the system, not individual users
@@ -391,6 +403,26 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	model := meta.Model
 	if model == "" {
 		model = c.Connector.Config.GetDefaultModel()
+	}
+
+	// Resolve family names (sonnet, opus, haiku) to actual model IDs
+	if IsModelFamily(model) {
+		family := GetModelFamilyName(model)
+		apiKey := c.getAPIKey()
+		if apiKey == "" {
+			return nil, fmt.Errorf("no API key configured")
+		}
+
+		resolvedModel, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, family)
+		if err != nil {
+			c.Connector.Log.Error().Err(err).Str("family", family).Msg("Failed to resolve model family")
+			return nil, fmt.Errorf("failed to resolve model '%s': %v", model, err)
+		}
+		c.Connector.Log.Debug().
+			Str("family", family).
+			Str("resolved", resolvedModel).
+			Msg("Resolved model family to latest version")
+		model = resolvedModel
 	}
 
 	temperature := meta.GetTemperature(c.Connector.Config.GetTemperature())

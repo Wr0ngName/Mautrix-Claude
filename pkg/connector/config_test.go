@@ -330,9 +330,16 @@ func TestExampleConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("example config mentions Claude models", func(t *testing.T) {
-		if !strings.Contains(ExampleConfig, "claude") {
-			t.Error("ExampleConfig should mention Claude models")
+	t.Run("example config mentions model families", func(t *testing.T) {
+		// Check that example config mentions model families (sonnet, opus, haiku)
+		if !strings.Contains(ExampleConfig, "sonnet") {
+			t.Error("ExampleConfig should mention sonnet model family")
+		}
+		if !strings.Contains(ExampleConfig, "opus") {
+			t.Error("ExampleConfig should mention opus model family")
+		}
+		if !strings.Contains(ExampleConfig, "haiku") {
+			t.Error("ExampleConfig should mention haiku model family")
 		}
 	})
 }

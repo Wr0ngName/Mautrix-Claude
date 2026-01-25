@@ -145,29 +145,44 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 	// Set new model - resolve alias if needed
 	newModel := strings.Join(ce.Args, "-")
 
-	// Map friendly shortcuts to model aliases (API will resolve these)
-	switch strings.ToLower(newModel) {
-	case "opus", "claude-opus":
-		newModel = "claude-opus-4-5-20251101"
-	case "sonnet", "claude-sonnet":
-		newModel = "claude-sonnet-4-5-20250929"
-	case "haiku", "claude-haiku":
-		newModel = "claude-haiku-4-5-20251001"
-	}
-
-	// Validate model ID format first (prevents abuse with overly long strings)
-	if err := ValidateModelID(newModel); err != nil {
-		ce.Reply("Invalid model ID: %v", err)
-		return
-	}
-
-	// Validate the model exists via API
-	ctx, cancel := context.WithTimeout(ce.Ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ce.Ctx, 15*time.Second)
 	defer cancel()
 
-	if err := claudeapi.ValidateModel(ctx, apiKey, newModel); err != nil {
-		ce.Reply("Invalid model: `%s`\n\nError: %v\n\nRun `models` to see available options.", newModel, err)
-		return
+	// Map friendly shortcuts to latest model of that family (dynamically from API)
+	switch strings.ToLower(newModel) {
+	case "opus", "claude-opus":
+		resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "opus")
+		if err != nil {
+			ce.Reply("Failed to resolve opus model: %v", err)
+			return
+		}
+		newModel = resolved
+	case "sonnet", "claude-sonnet":
+		resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "sonnet")
+		if err != nil {
+			ce.Reply("Failed to resolve sonnet model: %v", err)
+			return
+		}
+		newModel = resolved
+	case "haiku", "claude-haiku":
+		resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "haiku")
+		if err != nil {
+			ce.Reply("Failed to resolve haiku model: %v", err)
+			return
+		}
+		newModel = resolved
+	default:
+		// Validate model ID format first (prevents abuse with overly long strings)
+		if err := ValidateModelID(newModel); err != nil {
+			ce.Reply("Invalid model ID: %v", err)
+			return
+		}
+
+		// Validate the model exists via API
+		if err := claudeapi.ValidateModel(ctx, apiKey, newModel); err != nil {
+			ce.Reply("Invalid model: `%s`\n\nError: %v\n\nRun `models` to see available options.", newModel, err)
+			return
+		}
 	}
 
 	// Update portal metadata - save old value for rollback on failure

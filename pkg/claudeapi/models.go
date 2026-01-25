@@ -222,10 +222,54 @@ func ResolveModelAlias(ctx context.Context, apiKey string, alias string) (string
 	return info.ID, nil
 }
 
+// GetLatestModelByFamily returns the most recent model ID for a given family.
+// Requires models to be cached first via FetchModels or GetCachedModels.
+func GetLatestModelByFamily(family string) string {
+	family = strings.ToLower(family)
+	models := globalModelCache.GetAll()
+
+	var latest *ModelInfo
+	for i := range models {
+		m := &models[i]
+		if m.Family == family {
+			if latest == nil || m.CreatedAt.After(latest.CreatedAt) {
+				latest = m
+			}
+		}
+	}
+
+	if latest != nil {
+		return latest.ID
+	}
+	return ""
+}
+
+// GetLatestModelByFamilyFromAPI fetches models and returns the latest for a family.
+// Use this when you need to ensure fresh data from the API.
+func GetLatestModelByFamilyFromAPI(ctx context.Context, apiKey string, family string) (string, error) {
+	// Fetch fresh model list
+	_, err := FetchModels(ctx, apiKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch models: %w", err)
+	}
+
+	modelID := GetLatestModelByFamily(family)
+	if modelID == "" {
+		return "", fmt.Errorf("no models found for family: %s", family)
+	}
+
+	return modelID, nil
+}
+
 // GetDefaultModelID returns a sensible default model ID.
-// This should be used only when no model is configured.
+// If cache is available, returns the latest sonnet. Otherwise returns a fallback.
 func GetDefaultModelID() string {
-	// Use the latest Claude Sonnet as default - this alias is resolved by the API
+	// Try to get latest sonnet from cache
+	if modelID := GetLatestModelByFamily("sonnet"); modelID != "" {
+		return modelID
+	}
+	// Fallback only used if cache is empty (first run before any API calls)
+	// The API will resolve this or fail with a helpful error
 	return "claude-sonnet-4-5-20250929"
 }
 

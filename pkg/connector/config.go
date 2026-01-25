@@ -3,8 +3,6 @@ package connector
 import (
 	"fmt"
 	"strings"
-
-	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
 
 // DefaultTemperature is the default temperature when not specified.
@@ -54,9 +52,10 @@ const ExampleConfig = `
     # Claude API connector configuration
 
     # Default Claude model to use
-    # Run the "models" command after login to see available models
-    # Common options: claude-sonnet-4-5-20250929, claude-opus-4-5-20251101, claude-haiku-4-5-20251001
-    default_model: claude-sonnet-4-5-20250929
+    # Use family names (sonnet, opus, haiku) to automatically use the latest version
+    # Or specify a full model ID for a specific version
+    # Run the "models" command after login to see all available models
+    default_model: sonnet
 
     # Maximum tokens for responses (depends on model, typically 4096-64000)
     max_tokens: 4096
@@ -117,12 +116,36 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// GetDefaultModel returns the default model, using a fallback if not set.
+// GetDefaultModel returns the configured default model.
+// This may be a family name (sonnet, opus, haiku) that needs resolution.
 func (c *Config) GetDefaultModel() string {
 	if c.DefaultModel == "" {
-		return claudeapi.GetDefaultModelID()
+		return "sonnet" // Default to latest sonnet
 	}
 	return c.DefaultModel
+}
+
+// IsModelFamily checks if a model string is a family name that needs resolution.
+func IsModelFamily(model string) bool {
+	switch strings.ToLower(model) {
+	case "sonnet", "opus", "haiku", "claude-sonnet", "claude-opus", "claude-haiku":
+		return true
+	}
+	return false
+}
+
+// GetModelFamily extracts the family name from a model string.
+func GetModelFamilyName(model string) string {
+	model = strings.ToLower(model)
+	switch model {
+	case "sonnet", "claude-sonnet":
+		return "sonnet"
+	case "opus", "claude-opus":
+		return "opus"
+	case "haiku", "claude-haiku":
+		return "haiku"
+	}
+	return ""
 }
 
 // GetMaxTokens returns the max tokens, using a default if not set.
