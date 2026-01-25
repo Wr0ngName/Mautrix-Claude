@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"maunium.net/go/mautrix/bridge/status"
+	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -151,8 +151,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	// Get or create conversation manager for this portal
 	convMgr := c.getConversationManager(msg.Portal)
 
-	// Add user message to history
-	convMgr.AddMessage("user", msg.Content.Body)
+	// Add user message to history with Matrix event ID for tracking
+	userMsgID := string(msg.Event.ID)
+	convMgr.AddMessageWithID("user", msg.Content.Body, userMsgID)
 
 	// Prepare API request
 	model := meta.Model
@@ -220,7 +221,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		return nil, fmt.Errorf("received empty response from Claude")
 	}
 
-	convMgr.AddMessage("assistant", responseContent)
+	convMgr.AddMessageWithID("assistant", responseContent, claudeMessageID)
 
 	// Trim conversation if needed
 	if err := convMgr.TrimToTokenLimit(); err != nil {
@@ -329,30 +330,95 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 }
 
 // GetCapabilities returns the capabilities for a specific portal.
-func (c *ClaudeClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *bridgev2.NetworkRoomCapabilities {
-	return &bridgev2.NetworkRoomCapabilities{
-		FormattedText:    true,
-		UserMentions:     false,
-		RoomMentions:     false,
-		LocationMessages: false,
-		Captions:         false,
-		MaxTextLength:    100000, // Claude has large context window
-		Edits:            false,
-		Deletes:          false,
-		Reactions:        false,
-		Replies:          true, // Could implement as conversation context
-		ReadReceipts:     false,
+func (c *ClaudeClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
+	return &event.RoomFeatures{
+		Formatting: event.FormattingFeatureMap{
+			event.FmtBold:          event.CapLevelFullySupported,
+			event.FmtItalic:        event.CapLevelFullySupported,
+			event.FmtStrikethrough: event.CapLevelFullySupported,
+			event.FmtInlineCode:    event.CapLevelFullySupported,
+			event.FmtCodeBlock:     event.CapLevelFullySupported,
+		},
+		MaxTextLength:       100000, // Claude has large context window
+		Edit:                event.CapLevelFullySupported,
+		Delete:              event.CapLevelFullySupported,
+		Reaction:            event.CapLevelUnsupported,
+		Reply:               event.CapLevelPartialSupport, // Could implement as conversation context
+		ReadReceipts:        false,
+		TypingNotifications: false,
 	}
 }
 
-// HandleMatrixEdit handles an edit to a Matrix message (not supported).
+// HandleMatrixEdit handles an edit to a Matrix message.
+// When a user edits a message, we update the conversation history and remove
+// any subsequent messages (since the conversation flow has changed).
 func (c *ClaudeClient) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit) error {
-	return fmt.Errorf("message editing is not supported")
+	// Get the conversation manager for this portal
+	convMgr := c.getConversationManager(msg.Portal)
+
+	// Get the original message ID being edited
+	originalMsgID := string(msg.EditTarget.ID)
+
+	// Get the new content
+	newContent := msg.Content.Body
+
+	// Try to edit by the original message ID
+	if convMgr.EditMessageByID(originalMsgID, newContent) {
+		c.Connector.Log.Debug().
+			Str("message_id", originalMsgID).
+			Str("new_content", newContent[:min(50, len(newContent))]).
+			Msg("Edited message in conversation history")
+		return nil
+	}
+
+	// If message not found by ID, try to edit the last user message
+	// This handles cases where the message ID wasn't tracked
+	if err := convMgr.EditLastUserMessage(newContent); err != nil {
+		c.Connector.Log.Warn().
+			Str("message_id", originalMsgID).
+			Err(err).
+			Msg("Could not find message to edit")
+		return fmt.Errorf("message not found in conversation history")
+	}
+
+	c.Connector.Log.Debug().
+		Str("message_id", originalMsgID).
+		Msg("Edited last user message in conversation history")
+	return nil
 }
 
-// HandleMatrixMessageRemove handles a deletion of a Matrix message (not supported).
+// HandleMatrixMessageRemove handles a deletion of a Matrix message.
+// When a user deletes a message, we remove it from the conversation history
+// along with any subsequent messages (since the conversation flow is broken).
 func (c *ClaudeClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.MatrixMessageRemove) error {
-	return fmt.Errorf("message deletion is not supported")
+	// Get the conversation manager for this portal
+	convMgr := c.getConversationManager(msg.Portal)
+
+	// Get the message ID being deleted
+	deletedMsgID := string(msg.TargetMessage.ID)
+
+	// Try to delete by message ID
+	if convMgr.DeleteMessageByID(deletedMsgID) {
+		c.Connector.Log.Debug().
+			Str("message_id", deletedMsgID).
+			Msg("Deleted message from conversation history")
+		return nil
+	}
+
+	// If message not found by ID, try to delete the last user message
+	// This handles cases where the message ID wasn't tracked
+	if err := convMgr.DeleteLastUserMessage(); err != nil {
+		c.Connector.Log.Warn().
+			Str("message_id", deletedMsgID).
+			Err(err).
+			Msg("Could not find message to delete")
+		return fmt.Errorf("message not found in conversation history")
+	}
+
+	c.Connector.Log.Debug().
+		Str("message_id", deletedMsgID).
+		Msg("Deleted last user message from conversation history")
+	return nil
 }
 
 // HandleMatrixReaction handles a reaction to a Matrix message (not supported).

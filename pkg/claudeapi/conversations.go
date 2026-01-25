@@ -2,13 +2,20 @@
 package claudeapi
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
 
+// TrackedMessage wraps a Message with an external ID for tracking.
+type TrackedMessage struct {
+	Message
+	ExternalID string // External ID (e.g., Matrix message ID)
+}
+
 // ConversationManager manages conversation history and context.
 type ConversationManager struct {
-	messages   []Message
+	messages   []TrackedMessage
 	maxTokens  int
 	mu         sync.RWMutex
 	createdAt  time.Time
@@ -19,7 +26,7 @@ type ConversationManager struct {
 func NewConversationManager(maxTokens int) *ConversationManager {
 	now := time.Now()
 	return &ConversationManager{
-		messages:   make([]Message, 0),
+		messages:   make([]TrackedMessage, 0),
 		maxTokens:  maxTokens,
 		createdAt:  now,
 		lastUsedAt: now,
@@ -28,33 +35,158 @@ func NewConversationManager(maxTokens int) *ConversationManager {
 
 // AddMessage adds a message to the conversation history.
 func (cm *ConversationManager) AddMessage(role, content string) {
+	cm.AddMessageWithID(role, content, "")
+}
+
+// AddMessageWithID adds a message with an external ID for tracking.
+func (cm *ConversationManager) AddMessageWithID(role, content, externalID string) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	message := Message{
-		Role: role,
-		Content: []Content{
-			{
-				Type: "text",
-				Text: content,
+	message := TrackedMessage{
+		Message: Message{
+			Role: role,
+			Content: []Content{
+				{
+					Type: "text",
+					Text: content,
+				},
 			},
 		},
+		ExternalID: externalID,
 	}
 
 	cm.messages = append(cm.messages, message)
 	cm.lastUsedAt = time.Now()
 }
 
-// GetMessages returns a copy of all messages in the conversation.
+// GetMessages returns a copy of all messages in the conversation (without tracking info).
 func (cm *ConversationManager) GetMessages() []Message {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	// Return a copy to prevent external modification
+	// Return plain Messages for API calls
 	messagesCopy := make([]Message, len(cm.messages))
-	copy(messagesCopy, cm.messages)
+	for i, tm := range cm.messages {
+		messagesCopy[i] = tm.Message
+	}
 
 	return messagesCopy
+}
+
+// EditMessageByID edits a message by its external ID.
+// If the message is found, it updates the content and removes all subsequent messages
+// (since changing a message invalidates all following responses).
+// Returns true if the message was found and edited.
+func (cm *ConversationManager) EditMessageByID(externalID, newContent string) bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	for i, tm := range cm.messages {
+		if tm.ExternalID == externalID {
+			// Update the message content
+			cm.messages[i].Content = []Content{
+				{
+					Type: "text",
+					Text: newContent,
+				},
+			}
+
+			// Remove all messages after this one (they're now invalid)
+			cm.messages = cm.messages[:i+1]
+
+			cm.lastUsedAt = time.Now()
+			return true
+		}
+	}
+
+	return false
+}
+
+// DeleteMessageByID deletes a message by its external ID.
+// Also removes all subsequent messages (since the conversation flow is broken).
+// Returns true if the message was found and deleted.
+func (cm *ConversationManager) DeleteMessageByID(externalID string) bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	for i, tm := range cm.messages {
+		if tm.ExternalID == externalID {
+			// Remove this message and all after it
+			cm.messages = cm.messages[:i]
+
+			cm.lastUsedAt = time.Now()
+			return true
+		}
+	}
+
+	return false
+}
+
+// GetMessageByID returns the content of a message by its external ID.
+func (cm *ConversationManager) GetMessageByID(externalID string) (string, bool) {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	for _, tm := range cm.messages {
+		if tm.ExternalID == externalID {
+			if len(tm.Content) > 0 {
+				return tm.Content[0].Text, true
+			}
+			return "", true
+		}
+	}
+
+	return "", false
+}
+
+// EditLastUserMessage edits the most recent user message.
+// Removes any assistant messages that came after it.
+// Returns an error if there's no user message to edit.
+func (cm *ConversationManager) EditLastUserMessage(newContent string) error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	// Find the last user message
+	for i := len(cm.messages) - 1; i >= 0; i-- {
+		if cm.messages[i].Role == "user" {
+			// Update content
+			cm.messages[i].Content = []Content{
+				{
+					Type: "text",
+					Text: newContent,
+				},
+			}
+
+			// Remove all messages after this one
+			cm.messages = cm.messages[:i+1]
+
+			cm.lastUsedAt = time.Now()
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no user message found to edit")
+}
+
+// DeleteLastUserMessage deletes the most recent user message and its response.
+// Returns an error if there's no user message to delete.
+func (cm *ConversationManager) DeleteLastUserMessage() error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	// Find the last user message
+	for i := len(cm.messages) - 1; i >= 0; i-- {
+		if cm.messages[i].Role == "user" {
+			// Remove this message and all after it
+			cm.messages = cm.messages[:i]
+
+			cm.lastUsedAt = time.Now()
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no user message found to delete")
 }
 
 // Clear removes all messages from the conversation.
@@ -62,7 +194,7 @@ func (cm *ConversationManager) Clear() {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	cm.messages = make([]Message, 0)
+	cm.messages = make([]TrackedMessage, 0)
 	cm.lastUsedAt = time.Now()
 }
 
@@ -177,4 +309,22 @@ func (cm *ConversationManager) IsExpired(maxAge time.Duration) bool {
 		return false
 	}
 	return cm.IdleTime() > maxAge
+}
+
+// HasMessages returns true if the conversation has any messages.
+func (cm *ConversationManager) HasMessages() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return len(cm.messages) > 0
+}
+
+// LastMessageRole returns the role of the last message, or empty string if no messages.
+func (cm *ConversationManager) LastMessageRole() string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	if len(cm.messages) == 0 {
+		return ""
+	}
+	return cm.messages[len(cm.messages)-1].Role
 }

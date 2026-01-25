@@ -74,6 +74,12 @@ func (c *ClaudeConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities
 	}
 }
 
+// GetBridgeInfoVersion returns version numbers for bridge info and room capabilities.
+// When the versions change, the bridge will automatically resend bridge info to all rooms.
+func (c *ClaudeConnector) GetBridgeInfoVersion() (info, capabilities int) {
+	return 1, 1
+}
+
 // GetConfig returns the connector configuration.
 func (c *ClaudeConnector) GetConfig() (example string, data any, upgrader configupgrade.Upgrader) {
 	return ExampleConfig, &c.Config, nil

@@ -18,7 +18,10 @@ type APIKeyLogin struct {
 	Connector *ClaudeConnector
 }
 
-var _ bridgev2.LoginProcess = (*APIKeyLogin)(nil)
+var (
+	_ bridgev2.LoginProcess          = (*APIKeyLogin)(nil)
+	_ bridgev2.LoginProcessUserInput = (*APIKeyLogin)(nil)
+)
 
 // Start begins the API key login flow.
 func (a *APIKeyLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
