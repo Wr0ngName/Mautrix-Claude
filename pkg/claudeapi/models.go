@@ -1,7 +1,17 @@
 // Package claudeapi provides a client for the Claude API.
 package claudeapi
 
-// Model constants for Claude API.
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Model constants for Claude API (fallbacks if API unavailable).
 const (
 	ModelOpus4_5   = "claude-opus-4-5-20251101"
 	ModelSonnet4_5 = "claude-sonnet-4-5-20250924"
@@ -11,7 +21,109 @@ const (
 )
 
 // DefaultModel is the default Claude model to use.
-var DefaultModel = ModelSonnet3_5
+var DefaultModel = ModelSonnet4_5
+
+// modelCache stores dynamically fetched models.
+var (
+	modelCache     []APIModel
+	modelCacheMu   sync.RWMutex
+	modelCacheTime time.Time
+	modelCacheTTL  = 1 * time.Hour
+)
+
+// APIModel represents a model from the Claude API.
+type APIModel struct {
+	ID          string    `json:"id"`
+	DisplayName string    `json:"display_name"`
+	CreatedAt   time.Time `json:"created_at"`
+	Type        string    `json:"type"`
+}
+
+// modelsResponse represents the response from /v1/models.
+type modelsResponse struct {
+	Data    []APIModel `json:"data"`
+	HasMore bool       `json:"has_more"`
+}
+
+// FetchModels fetches available models from the Claude API.
+func FetchModels(ctx context.Context, apiKey string) ([]APIModel, error) {
+	// Check cache first
+	modelCacheMu.RLock()
+	if len(modelCache) > 0 && time.Since(modelCacheTime) < modelCacheTTL {
+		models := make([]APIModel, len(modelCache))
+		copy(models, modelCache)
+		modelCacheMu.RUnlock()
+		return models, nil
+	}
+	modelCacheMu.RUnlock()
+
+	// Fetch from API
+	req, err := http.NewRequestWithContext(ctx, "GET", DefaultBaseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", DefaultVersion)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, ParseAPIError(resp)
+	}
+
+	var result modelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	// Update cache
+	modelCacheMu.Lock()
+	modelCache = result.Data
+	modelCacheTime = time.Now()
+	modelCacheMu.Unlock()
+
+	return result.Data, nil
+}
+
+// GetLatestModelByFamily returns the latest model for a given family (opus, sonnet, haiku).
+func GetLatestModelByFamily(models []APIModel, family string) string {
+	family = strings.ToLower(family)
+	var candidates []APIModel
+
+	for _, m := range models {
+		modelLower := strings.ToLower(m.ID)
+		if strings.Contains(modelLower, family) {
+			candidates = append(candidates, m)
+		}
+	}
+
+	if len(candidates) == 0 {
+		// Return fallback
+		switch family {
+		case "opus":
+			return ModelOpus4_5
+		case "sonnet":
+			return ModelSonnet4_5
+		case "haiku":
+			return ModelHaiku3_5
+		default:
+			return ModelSonnet4_5
+		}
+	}
+
+	// Sort by created_at descending (newest first)
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+	})
+
+	return candidates[0].ID
+}
 
 // ValidModels is a list of all valid Claude models.
 var ValidModels = []string{

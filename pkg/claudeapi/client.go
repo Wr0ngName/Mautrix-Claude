@@ -283,14 +283,25 @@ func (c *Client) ValidateAPIKey(ctx context.Context) error {
 
 // Validate checks if the API key is valid by making a minimal test request.
 func (c *Client) Validate(ctx context.Context) error {
+	// First, try to fetch available models to get the latest one
+	model := DefaultModel
+	models, err := FetchModels(ctx, c.APIKey)
+	if err != nil {
+		c.Log.Debug().Err(err).Msg("Failed to fetch models, using default")
+	} else if len(models) > 0 {
+		// Use the latest sonnet model
+		model = GetLatestModelByFamily(models, "sonnet")
+		c.Log.Debug().Str("model", model).Int("total_models", len(models)).Msg("Using latest sonnet model")
+	}
+
 	// Make a minimal request to validate the API key
 	req := &CreateMessageRequest{
-		Model: DefaultModel,
+		Model: model,
 		Messages: []Message{
 			{
 				Role: "user",
 				Content: []Content{
-					{Type: "text", Text: "test"},
+					{Type: "text", Text: "hi"},
 				},
 			},
 		},
@@ -302,7 +313,7 @@ func (c *Client) Validate(ctx context.Context) error {
 		Str("base_url", c.BaseURL).
 		Msg("Validating API key")
 
-	_, err := c.CreateMessage(ctx, req)
+	_, err = c.CreateMessage(ctx, req)
 	if err != nil {
 		c.Log.Debug().
 			Err(err).

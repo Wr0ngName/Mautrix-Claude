@@ -37,9 +37,8 @@ const ExampleConfig = `
 
     # Default Claude model to use
     # Valid models: claude-opus-4-5-20251101, claude-sonnet-4-5-20250924,
-    #               claude-3-5-sonnet-20241022, claude-3-5-haiku-20241022,
-    #               claude-3-opus-20240229
-    default_model: claude-3-5-sonnet-20241022
+    #               claude-3-5-haiku-20241022, claude-3-opus-20240229
+    default_model: claude-sonnet-4-5-20250924
 
     # Maximum tokens for responses (1-16384 depending on model)
     max_tokens: 4096
