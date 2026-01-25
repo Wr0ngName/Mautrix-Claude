@@ -60,6 +60,24 @@ func (cm *ConversationManager) AddMessageWithID(role, content, externalID string
 	cm.lastUsedAt = time.Now()
 }
 
+// AddMessageWithContent adds a message with arbitrary content (text, images, etc).
+// Use this when you have content that includes images or mixed content types.
+func (cm *ConversationManager) AddMessageWithContent(role string, content []Content, externalID string) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	message := TrackedMessage{
+		Message: Message{
+			Role:    role,
+			Content: content,
+		},
+		ExternalID: externalID,
+	}
+
+	cm.messages = append(cm.messages, message)
+	cm.lastUsedAt = time.Now()
+}
+
 // GetMessages returns a copy of all messages in the conversation (without tracking info).
 func (cm *ConversationManager) GetMessages() []Message {
 	cm.mu.RLock()

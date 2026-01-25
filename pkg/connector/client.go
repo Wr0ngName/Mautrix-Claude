@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -18,6 +19,65 @@ import (
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
+
+// Supported image MIME types for Claude Vision API.
+var supportedImageTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// isImageSupported checks if a MIME type is supported by Claude Vision.
+func isImageSupported(mimeType string) bool {
+	return supportedImageTypes[mimeType]
+}
+
+// downloadAndEncodeImage downloads an image from Matrix and converts it to base64.
+func (c *ClaudeClient) downloadAndEncodeImage(ctx context.Context, content *event.MessageEventContent) (*claudeapi.Content, error) {
+	// Get the content URI
+	uri := content.URL
+	if uri == "" && content.File != nil {
+		uri = content.File.URL
+	}
+	if uri == "" {
+		return nil, fmt.Errorf("no image URL found")
+	}
+
+	// Get MIME type
+	mimeType := "image/jpeg" // Default
+	if content.Info != nil && content.Info.MimeType != "" {
+		mimeType = content.Info.MimeType
+	}
+
+	// Check if image type is supported
+	if !isImageSupported(mimeType) {
+		return nil, fmt.Errorf("unsupported image type: %s (supported: jpeg, png, gif, webp)", mimeType)
+	}
+
+	// Download the image using the bridge bot's Matrix API
+	imageData, err := c.Connector.br.Bot.DownloadMedia(ctx, uri, content.File)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download image: %w", err)
+	}
+
+	// Convert to base64
+	base64Data := base64.StdEncoding.EncodeToString(imageData)
+
+	c.Connector.Log.Debug().
+		Str("mime_type", mimeType).
+		Int("size_bytes", len(imageData)).
+		Msg("Downloaded and encoded image for Claude Vision")
+
+	return &claudeapi.Content{
+		Type: "image",
+		Source: &claudeapi.ImageSource{
+			Type:      "base64",
+			MediaType: mimeType,
+			Data:      base64Data,
+		},
+	}, nil
+}
 
 // ClaudeClient represents a client connection to Claude (API or Web).
 type ClaudeClient struct {
@@ -245,10 +305,16 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		meta = &PortalMetadata{} // Use empty metadata with defaults
 	}
 
+	bodyPreview := msg.Content.Body
+	if len(bodyPreview) > 50 {
+		bodyPreview = bodyPreview[:50]
+	}
+
 	c.Connector.Log.Debug().
 		Str("portal_id", string(msg.Portal.PortalKey.ID)).
 		Str("sender", string(msg.Event.Sender)).
-		Str("body", msg.Content.Body[:min(50, len(msg.Content.Body))]).
+		Str("msg_type", string(msg.Content.MsgType)).
+		Str("body", bodyPreview).
 		Msg("Handling Matrix message")
 
 	// Check rate limit before processing
@@ -263,9 +329,52 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	// Get or create conversation manager for this portal
 	convMgr := c.getConversationManager(msg.Portal)
 
-	// Add user message to history with Matrix event ID for tracking
+	// Build content array based on message type
 	userMsgID := string(msg.Event.ID)
-	convMgr.AddMessageWithID("user", msg.Content.Body, userMsgID)
+	var messageContent []claudeapi.Content
+
+	// Handle different message types
+	switch msg.Content.MsgType {
+	case event.MsgImage:
+		// Image message - download and encode the image
+		imageContent, err := c.downloadAndEncodeImage(ctx, msg.Content)
+		if err != nil {
+			c.Connector.Log.Warn().Err(err).Msg("Failed to process image")
+			return nil, fmt.Errorf("failed to process image: %w", err)
+		}
+		messageContent = append(messageContent, *imageContent)
+
+		// Add caption/body text if present
+		if msg.Content.Body != "" && msg.Content.Body != msg.Content.FileName {
+			messageContent = append(messageContent, claudeapi.Content{
+				Type: "text",
+				Text: msg.Content.Body,
+			})
+		} else {
+			// Add a default prompt for image analysis
+			messageContent = append(messageContent, claudeapi.Content{
+				Type: "text",
+				Text: "What's in this image?",
+			})
+		}
+
+		c.Connector.Log.Info().
+			Int("content_parts", len(messageContent)).
+			Msg("Processing image message with Claude Vision")
+
+	default:
+		// Text message (or other text-based types)
+		if msg.Content.Body == "" {
+			return nil, fmt.Errorf("empty message body")
+		}
+		messageContent = append(messageContent, claudeapi.Content{
+			Type: "text",
+			Text: msg.Content.Body,
+		})
+	}
+
+	// Add user message to history with Matrix event ID for tracking
+	convMgr.AddMessageWithContent("user", messageContent, userMsgID)
 
 	// Prepare API request - use portal-specific or connector defaults
 	model := meta.Model
@@ -463,6 +572,19 @@ func (c *ClaudeClient) GetCapabilities(ctx context.Context, portal *bridgev2.Por
 			event.FmtInlineCode:    event.CapLevelFullySupported,
 			event.FmtCodeBlock:     event.CapLevelFullySupported,
 		},
+		File: event.FileFeatureMap{
+			// Claude Vision supports these image types
+			event.MsgImage: {
+				MaxSize: 20 * 1024 * 1024, // 20MB max for Claude Vision
+				MimeTypes: map[string]event.CapabilitySupportLevel{
+					"image/jpeg": event.CapLevelFullySupported,
+					"image/png":  event.CapLevelFullySupported,
+					"image/gif":  event.CapLevelFullySupported,
+					"image/webp": event.CapLevelFullySupported,
+				},
+				Caption: event.CapLevelFullySupported, // Support image captions
+			},
+		},
 		MaxTextLength:       100000, // Claude has large context window
 		Edit:                event.CapLevelFullySupported,
 		Delete:              event.CapLevelFullySupported,
@@ -608,6 +730,11 @@ func (c *ClaudeClient) GetConversationStats(portalID networkid.PortalID) (messag
 // ResolveIdentifier resolves an identifier to start a new chat.
 // Supported identifiers: "claude", "opus", "sonnet", "haiku", or full model names.
 func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string, createChat bool) (*bridgev2.ResolveIdentifierResponse, error) {
+	c.Connector.Log.Debug().
+		Str("identifier", identifier).
+		Bool("create_chat", createChat).
+		Msg("Resolving identifier")
+
 	// Parse identifier to determine the model
 	model := c.parseModelIdentifier(identifier)
 	if model == "" {
@@ -616,53 +743,44 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 
 	ghostID := MakeClaudeGhostID(model)
 
-	// Get or create the ghost via the bridge (this ensures the ghost exists and has an Intent)
-	ghost, err := c.Connector.br.GetGhostByID(ctx, ghostID)
-	if err != nil {
-		c.Connector.Log.Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to get ghost")
-		return nil, fmt.Errorf("failed to get ghost: %w", err)
-	}
-
-	// Get or create ghost info
+	// Get display name for the model
 	displayName := fmt.Sprintf("Claude (%s)", model)
 	if info := claudeapi.GetModelInfo(model); info != nil {
 		displayName = info.Name
 	}
 	isBot := true
 
-	userInfo := &bridgev2.UserInfo{
+	// Create user info for the ghost
+	ghostUserInfo := &bridgev2.UserInfo{
 		Name:        &displayName,
 		IsBot:       &isBot,
 		Identifiers: []string{fmt.Sprintf("claude:%s", model)},
 	}
 
-	// Update ghost info
-	ghost.UpdateInfo(ctx, userInfo)
+	roomType := database.RoomTypeDM
+	chatName := fmt.Sprintf("Conversation with %s", displayName)
+
+	// Generate a unique conversation ID
+	conversationID := fmt.Sprintf("conv_%s_%d", claudeapi.GetModelFamily(model), time.Now().UnixNano())
+	portalKey := MakeClaudePortalKey(conversationID)
+
+	c.Connector.Log.Info().
+		Str("identifier", identifier).
+		Str("model", model).
+		Str("conversation_id", conversationID).
+		Str("ghost_id", string(ghostID)).
+		Msg("Resolved identifier for portal")
 
 	resp := &bridgev2.ResolveIdentifierResponse{
-		Ghost:    ghost,
 		UserID:   ghostID,
-		UserInfo: userInfo,
-	}
-
-	// If createChat is requested, create the portal
-	if createChat {
-		// Generate a unique conversation ID
-		conversationID := fmt.Sprintf("conv_%s_%d", claudeapi.GetModelFamily(model), time.Now().UnixNano())
-		portalKey := MakeClaudePortalKey(conversationID)
-
-		roomType := database.RoomTypeDM
-		chatName := fmt.Sprintf("Conversation with %s", displayName)
-
-		// Member list must include BOTH the user (IsFromMe=true) and the ghost (IsFromMe=false)
-		// This ensures the user gets invited to the room
-		resp.Chat = &bridgev2.CreateChatResponse{
+		UserInfo: ghostUserInfo,
+		Chat: &bridgev2.CreateChatResponse{
 			PortalKey: portalKey,
 			PortalInfo: &bridgev2.ChatInfo{
 				Name: &chatName,
+				Type: &roomType,
 				Members: &bridgev2.ChatMemberList{
-					IsFull:      true,
-					OtherUserID: ghostID, // Set the ghost as the "other user" in this DM
+					IsFull: true,
 					Members: []bridgev2.ChatMember{
 						{
 							// The user who is starting the chat - they will be invited
@@ -671,33 +789,39 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 							},
 						},
 						{
-							// The Claude ghost
+							// The Claude ghost - include UserInfo for proper setup
 							EventSender: bridgev2.EventSender{
 								IsFromMe: false,
 								Sender:   ghostID,
 							},
+							UserInfo: ghostUserInfo,
 						},
 					},
 				},
-				Type: &roomType,
+				// ExtraUpdates callback to properly set portal metadata after creation
+				ExtraUpdates: func(ctx context.Context, p *bridgev2.Portal) bool {
+					pm, ok := p.Metadata.(*PortalMetadata)
+					if !ok {
+						c.Connector.Log.Error().Msg("Portal metadata type assertion failed in ResolveIdentifier")
+						return false
+					}
+					pm.ConversationName = chatName
+					pm.Model = model
+					c.Connector.Log.Debug().
+						Str("model", model).
+						Str("chat_name", chatName).
+						Msg("Set portal metadata via ExtraUpdates")
+					return true
+				},
 			},
-		}
-
-		// Store portal metadata for later use
-		if portal, err := c.Connector.br.GetPortalByKey(ctx, portalKey); err == nil && portal != nil {
-			portal.Metadata = &PortalMetadata{
-				ConversationName: chatName,
-				Model:            model,
-			}
-		}
-
-		c.Connector.Log.Info().
-			Str("identifier", identifier).
-			Str("model", model).
-			Str("conversation_id", conversationID).
-			Str("ghost_mxid", ghost.Intent.GetMXID().String()).
-			Msg("Created new chat")
+		},
 	}
+
+	c.Connector.Log.Info().
+		Str("identifier", identifier).
+		Str("model", model).
+		Str("conversation_id", conversationID).
+		Msg("Created chat response")
 
 	return resp, nil
 }
