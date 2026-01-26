@@ -117,3 +117,57 @@ func isValidAPIKeyFormat(apiKey string) bool {
 
 	return true
 }
+
+// SidecarLogin handles login when sidecar mode is enabled.
+// No API key is needed - authentication uses mounted ~/.claude credentials.
+type SidecarLogin struct {
+	User      *bridgev2.User
+	Connector *ClaudeConnector
+}
+
+var _ bridgev2.LoginProcess = (*SidecarLogin)(nil)
+
+// Start begins the sidecar login flow.
+func (s *SidecarLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
+	// Verify sidecar is healthy before allowing login
+	client := s.Connector.getSidecarClient()
+	if err := client.Validate(ctx); err != nil {
+		return nil, fmt.Errorf("sidecar not available: %w", err)
+	}
+
+	// Generate a unique login ID for this user
+	loginID := networkid.UserLoginID(fmt.Sprintf("sidecar_%s", strings.ReplaceAll(string(s.User.MXID), ":", "_")))
+
+	userLogin, err := s.User.NewLogin(ctx, &database.UserLogin{
+		ID:         loginID,
+		RemoteName: "Claude (Pro/Max)",
+		Metadata: &UserLoginMetadata{
+			APIKey: "", // No API key needed for sidecar
+		},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set up client with sidecar backend
+	claudeClient := &ClaudeClient{
+		MessageClient: client,
+		UserLogin:     userLogin,
+		Connector:     s.Connector,
+		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
+		rateLimiter:   NewRateLimiter(s.Connector.Config.GetRateLimitPerMinute()),
+	}
+	userLogin.Client = claudeClient
+
+	return &bridgev2.LoginStep{
+		Type:         bridgev2.LoginStepTypeComplete,
+		StepID:       "complete",
+		Instructions: "Successfully connected to Claude via Pro/Max subscription",
+		CompleteParams: &bridgev2.LoginCompleteParams{
+			UserLogin: userLogin,
+		},
+	}, nil
+}
+
+// Cancel cancels the login process.
+func (s *SidecarLogin) Cancel() {}

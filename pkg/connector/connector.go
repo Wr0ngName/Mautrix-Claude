@@ -89,6 +89,15 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// getSidecarClient returns a sidecar MessageClient for the connector.
+func (c *ClaudeConnector) getSidecarClient() claudeapi.MessageClient {
+	return sidecar.NewMessageClient(
+		SidecarURL,
+		time.Duration(SidecarTimeout)*time.Second,
+		c.Log,
+	)
+}
+
 // GetName returns the name of the network.
 func (c *ClaudeConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
@@ -137,6 +146,17 @@ func (c *ClaudeConnector) SetMaxFileSize(maxSize int64) {
 
 // GetLoginFlows returns the available login flows.
 func (c *ClaudeConnector) GetLoginFlows() []bridgev2.LoginFlow {
+	if c.Config.Sidecar.Enabled {
+		// Sidecar mode: authentication is handled by mounted ~/.claude credentials
+		return []bridgev2.LoginFlow{
+			{
+				Name:        "Sidecar (Pro/Max)",
+				Description: "Connect using the bridge's Claude Code authentication (no API key needed)",
+				ID:          "sidecar",
+			},
+		}
+	}
+	// API mode: user needs their own API key
 	return []bridgev2.LoginFlow{
 		{
 			Name:        "API Key",
@@ -151,6 +171,11 @@ func (c *ClaudeConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 	switch flowID {
 	case "api_key":
 		return &APIKeyLogin{
+			User:      user,
+			Connector: c,
+		}, nil
+	case "sidecar":
+		return &SidecarLogin{
 			User:      user,
 			Connector: c,
 		}, nil
