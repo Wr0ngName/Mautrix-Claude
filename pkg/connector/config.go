@@ -53,14 +53,17 @@ type Config struct {
 // SidecarConfig contains configuration for the Agent SDK sidecar.
 type SidecarConfig struct {
 	// Enabled enables the sidecar backend instead of direct API
+	// When enabled, uses Pro/Max subscription via Agent SDK instead of API credits
 	Enabled bool `yaml:"enabled"`
-
-	// URL is the sidecar HTTP endpoint (default: http://localhost:8090)
-	URL string `yaml:"url"`
-
-	// Timeout is the request timeout in seconds (default: 300)
-	Timeout int `yaml:"timeout"`
 }
+
+// Internal sidecar constants (not user-configurable)
+const (
+	// SidecarURL is the internal URL for the sidecar service
+	SidecarURL = "http://localhost:8090"
+	// SidecarTimeout is the default timeout for sidecar requests in seconds
+	SidecarTimeout = 300
+)
 
 // ExampleConfig is the example configuration for the connector.
 const ExampleConfig = `# Claude API connector configuration
@@ -91,16 +94,11 @@ conversation_max_age_hours: 24
 # Helps prevent API rate limit errors
 rate_limit_per_minute: 60
 
-# Sidecar configuration for Pro/Max subscription support
+# Sidecar mode for Pro/Max subscription support
 # When enabled, uses the Claude Agent SDK sidecar instead of direct API
 # This allows using Pro/Max subscriptions instead of API credits
 sidecar:
-    # Enable sidecar mode (requires sidecar service running)
     enabled: false
-    # Sidecar URL (default: http://localhost:8090 for same-container deployment)
-    url: http://localhost:8090
-    # Request timeout in seconds
-    timeout: 300
 `
 
 // Validate validates the configuration.
@@ -235,18 +233,3 @@ func TemperaturePtr(t float64) *float64 {
 	return &t
 }
 
-// GetSidecarURL returns the sidecar URL with default if not set.
-func (c *SidecarConfig) GetSidecarURL() string {
-	if c.URL == "" {
-		return "http://localhost:8090"
-	}
-	return c.URL
-}
-
-// GetSidecarTimeout returns the sidecar timeout with default if not set.
-func (c *SidecarConfig) GetSidecarTimeout() int {
-	if c.Timeout <= 0 {
-		return 300 // 5 minutes default
-	}
-	return c.Timeout
-}

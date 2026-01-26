@@ -156,13 +156,11 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 	// Choose backend based on config
 	if c.Config.Sidecar.Enabled {
 		// Use sidecar backend (Pro/Max subscription via Agent SDK)
-		log.Info().
-			Str("sidecar_url", c.Config.Sidecar.GetSidecarURL()).
-			Msg("Using sidecar backend for Pro/Max subscription")
+		log.Info().Msg("Using sidecar backend for Pro/Max subscription")
 
 		messageClient = sidecar.NewMessageClient(
-			c.Config.Sidecar.GetSidecarURL(),
-			time.Duration(c.Config.Sidecar.GetSidecarTimeout())*time.Second,
+			SidecarURL,
+			time.Duration(SidecarTimeout)*time.Second,
 			log,
 		)
 	} else {
