@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/bin/bash
+set -e
 
 if [[ -z "$GID" ]]; then
 	GID="$UID"
@@ -13,6 +14,35 @@ function fixperms {
 		yq -I4 e -i 'del(.logging.writers[1])' /data/config.yaml
 	fi
 }
+
+function start_sidecar {
+	echo "Starting Claude Agent SDK sidecar..."
+	gosu $UID:$GID python /app/sidecar/main.py &
+	SIDECAR_PID=$!
+
+	# Wait for sidecar to be ready
+	for i in {1..30}; do
+		if curl -sf http://localhost:8090/health > /dev/null 2>&1; then
+			echo "Sidecar is ready"
+			return 0
+		fi
+		echo "Waiting for sidecar... ($i/30)"
+		sleep 1
+	done
+
+	echo "WARNING: Sidecar failed to start within 30 seconds"
+	return 1
+}
+
+function cleanup {
+	echo "Shutting down..."
+	if [[ -n "$SIDECAR_PID" ]]; then
+		kill $SIDECAR_PID 2>/dev/null || true
+	fi
+	exit 0
+}
+
+trap cleanup SIGTERM SIGINT
 
 if [[ ! -f /data/config.yaml ]]; then
 	/usr/bin/mautrix-claude -c /data/config.yaml -e
@@ -33,4 +63,14 @@ fi
 
 cd /data
 fixperms
-exec su-exec $UID:$GID /usr/bin/mautrix-claude
+
+# Start sidecar if enabled
+if [[ "$ENABLE_SIDECAR" == "true" ]]; then
+	echo "Sidecar mode enabled (Pro/Max subscription via Agent SDK)"
+	start_sidecar || echo "Continuing without sidecar..."
+else
+	echo "API mode (direct Anthropic API)"
+fi
+
+# Run the bridge
+exec gosu $UID:$GID /usr/bin/mautrix-claude -c /data/config.yaml

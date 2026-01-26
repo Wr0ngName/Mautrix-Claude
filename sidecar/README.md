@@ -1,24 +1,23 @@
 # Claude Agent SDK Sidecar
 
-Python sidecar service that provides Claude AI capabilities to the mautrix-claude bridge using the official Agent SDK.
+Internal Python service that provides Claude AI capabilities using the official Agent SDK.
 
-## Why a Sidecar?
+## Overview
 
-- **Pro/Max Support**: Uses Claude Code's authentication (Pro/Max subscription) instead of API credits
-- **Official SDK**: Uses Anthropic's official Agent SDK - stable, maintained, ToS compliant
-- **Isolation**: Runs in separate container with restricted permissions
-- **Session Management**: Maintains conversation context per Matrix room
+This sidecar runs inside the mautrix-claude container and enables Pro/Max subscription support via the Claude Agent SDK instead of API credits.
 
-## Architecture
+**Note**: This is an internal component. Users don't need to configure or run it separately - it's automatically started when `ENABLE_SIDECAR=true` is set.
+
+## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Docker Compose                          │
+│                  mautrix-claude Container                    │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┐         ┌─────────────────────────┐   │
-│  │  mautrix-claude │  HTTP   │   claude-sidecar        │   │
-│  │    (Go bridge)  │◄───────►│   (Python Agent SDK)    │   │
-│  │                 │  :8090  │                         │   │
+│  │  Go Bridge      │  HTTP   │   Python Sidecar        │   │
+│  │  (mautrix-      │◄───────►│   (Agent SDK)           │   │
+│  │   claude)       │ :8090   │                         │   │
 │  └────────┬────────┘         └───────────┬─────────────┘   │
 │           │                              │                  │
 │           │ Matrix                       │ Claude API       │
@@ -30,12 +29,49 @@ Python sidecar service that provides Claude AI capabilities to the mautrix-claud
 ## Features
 
 - **Per-room sessions**: Each Matrix room has isolated conversation context
-- **Streaming responses**: Real-time response streaming to Matrix
-- **Tool restrictions**: No file/bash access - chat only mode
-- **Health checks**: Prometheus metrics and health endpoints
+- **Tool restrictions**: Only safe tools enabled (WebSearch, WebFetch, AskUserQuestion)
+- **Health checks**: Prometheus metrics at `/metrics`
 - **Graceful shutdown**: Proper cleanup of sessions
 
-## API Endpoints
+## Configuration
+
+Environment variables (set when running the container):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_SIDECAR` | `false` | Enable sidecar mode |
+| `CLAUDE_SIDECAR_ALLOWED_TOOLS` | `WebSearch,WebFetch,AskUserQuestion` | Allowed tools |
+| `CLAUDE_SIDECAR_SYSTEM_PROMPT` | `You are a helpful AI assistant.` | Default prompt |
+| `CLAUDE_SIDECAR_MODEL` | `sonnet` | Model to use |
+| `CLAUDE_SIDECAR_SESSION_TIMEOUT` | `3600` | Session timeout (seconds) |
+
+## Security: Allowed Tools
+
+Only safe tools are enabled by default:
+- `WebSearch` - Search the web
+- `WebFetch` - Fetch web pages
+- `AskUserQuestion` - Ask clarifying questions
+
+**Explicitly blocked** (hardcoded, cannot be enabled):
+- Read, Write, Edit, MultiEdit
+- Bash, Glob, Grep, LS
+- Task, TodoWrite, TodoRead
+- NotebookEdit
+
+## Usage
+
+Run the container with sidecar mode:
+
+```bash
+docker run -v ./data:/data \
+  -v ~/.claude:/home/bridge/.claude:ro \
+  -e ENABLE_SIDECAR=true \
+  mautrix-claude
+```
+
+The `~/.claude` mount provides the Claude Code authentication for Pro/Max subscriptions.
+
+## API Endpoints (Internal)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -43,35 +79,3 @@ Python sidecar service that provides Claude AI capabilities to the mautrix-claud
 | `/metrics` | GET | Prometheus metrics |
 | `/v1/chat` | POST | Send message, get response |
 | `/v1/sessions/{id}` | DELETE | Clear session |
-
-## Security: Allowed Tools
-
-By default, only safe tools are enabled:
-- `WebSearch` - Search the web
-- `WebFetch` - Fetch web pages
-- `AskUserQuestion` - Ask clarifying questions
-
-**Explicitly blocked** (no file access, no code execution):
-- Read, Write, Edit, MultiEdit
-- Bash, Glob, Grep, LS
-- Task, TodoWrite, TodoRead
-- NotebookEdit
-
-## Configuration
-
-Environment variables:
-- `CLAUDE_SIDECAR_PORT`: HTTP port (default: 8090)
-- `CLAUDE_SIDECAR_ALLOWED_TOOLS`: Comma-separated tools (default: WebSearch,WebFetch,AskUserQuestion)
-- `CLAUDE_SIDECAR_SYSTEM_PROMPT`: Default system prompt
-- `CLAUDE_SIDECAR_MODEL`: Model to use (default: sonnet)
-- `CLAUDE_SIDECAR_SESSION_TIMEOUT`: Session timeout in seconds (default: 3600)
-
-## Running
-
-```bash
-# Authenticate Claude Code first (one-time)
-claude
-
-# Run sidecar
-docker compose up claude-sidecar
-```
