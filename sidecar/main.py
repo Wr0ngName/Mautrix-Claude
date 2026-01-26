@@ -1093,8 +1093,6 @@ async def oauth_complete(request: OAuthCompleteRequest):
         start_time = time.time()
         creds_file = Path(config_dir) / ".credentials.json"
         default_creds = Path.home() / ".claude" / ".credentials.json"
-        # Also check $HOME/.claude.json (credentials may be embedded in main config when CLAUDE_CONFIG_DIR not set)
-        home_claude_json = Path.home() / ".claude.json"
         # Also check original CLAUDE_CONFIG_DIR (CLI might ignore our override)
         original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         original_creds = Path(original_config_dir) / ".credentials.json" if original_config_dir else None
@@ -1125,16 +1123,6 @@ async def oauth_complete(request: OAuthCompleteRequest):
                     mtime = original_creds.stat().st_mtime
                     if time.time() - mtime < 60:
                         logger.info(f"Credentials file appeared at original config dir {original_creds}")
-                        success_detected = True
-                        break
-                except:
-                    pass
-            # Check $HOME/.claude.json (credentials embedded in main config)
-            if home_claude_json.exists():
-                try:
-                    mtime = home_claude_json.stat().st_mtime
-                    if time.time() - mtime < 60:
-                        logger.info(f"Credentials file appeared at {home_claude_json}")
                         success_detected = True
                         break
                 except:
@@ -1228,19 +1216,6 @@ async def oauth_complete(request: OAuthCompleteRequest):
                     logger.warning(f"Credentials found at default location instead of {config_dir}")
             except:
                 pass
-        if not credentials_json and home_claude_json.exists():
-            # Check $HOME/.claude.json (credentials embedded in main config)
-            try:
-                mtime = home_claude_json.stat().st_mtime
-                if time.time() - mtime < 120:  # Modified in last 2 minutes
-                    # This file contains embedded credentials, extract them
-                    config_data = json.loads(home_claude_json.read_text())
-                    if "claudeAiOauth" in config_data or "oauthAccount" in config_data:
-                        credentials_json = home_claude_json.read_text()
-                        creds_source = "home_claude_json"
-                        logger.info(f"Credentials found at {home_claude_json}")
-            except:
-                pass
 
         if credentials_json:
             # Validate it's proper JSON
@@ -1265,7 +1240,7 @@ async def oauth_complete(request: OAuthCompleteRequest):
             clean = re.sub(r'\x1b.', '', clean)
 
             # Log full cleaned output for debugging
-            checked_paths = [str(creds_file), str(default_creds), str(home_claude_json)]
+            checked_paths = [str(creds_file), str(default_creds)]
             if original_creds:
                 checked_paths.append(str(original_creds))
             logger.error(f"OAuth failed - no credentials file at: {', '.join(checked_paths)}")
