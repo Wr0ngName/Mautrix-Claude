@@ -1189,24 +1189,22 @@ async def oauth_complete(request: OAuthCompleteRequest):
         logger.debug(f"OAuth full output (first 2000 chars): {clean_output[:2000]}")
 
         # Look for the actual OAuth token in output
-        # Pattern: token line after "export CLAUDE_CODE_OAUTH_TOKEN=" or similar
-        # The token is a long string (not the placeholder "<token>")
-        # OAuth tokens are typically JWT-like: base64 or alphanumeric with dots/underscores
+        # Token format: sk-ant-oat01-... (about 90+ chars)
         token_patterns = [
-            # Token on its own line (common output format)
+            # sk-ant-oat01-xxx format (the actual OAuth token format)
+            r'(sk-ant-oat01-[A-Za-z0-9_\-]+)',
+            # Generic long token on its own line
             r'\n([A-Za-z0-9_\-]{50,})\n',
             # export CLAUDE_CODE_OAUTH_TOKEN=actualtoken
             r'CLAUDE_CODE_OAUTH_TOKEN=([A-Za-z0-9_\-\.]{50,})',
-            # Token might be after a colon or equals
-            r'token[:\s]+([A-Za-z0-9_\-\.]{50,})',
         ]
 
         for pattern in token_patterns:
-            match = re.search(pattern, clean_output, re.IGNORECASE)
+            match = re.search(pattern, clean_output)
             if match:
                 oauth_token = match.group(1)
-                # Validate it's not a placeholder
-                if oauth_token and oauth_token != '<token>' and len(oauth_token) > 50:
+                # Validate it's a real token (sk-ant-oat01- tokens are ~91 chars)
+                if oauth_token and oauth_token.startswith('sk-ant-') and len(oauth_token) > 80:
                     credentials_json = json.dumps({
                         "claudeAiOauth": {
                             "token": oauth_token
