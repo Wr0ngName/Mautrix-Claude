@@ -221,23 +221,23 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 
 	var messageClient claudeapi.MessageClient
 
-	// Choose backend based on config
-	if c.Config.Sidecar.Enabled {
-		// Use sidecar backend (Pro/Max subscription via Agent SDK)
+	// Choose backend based on login type (credentials present), not global config
+	if metadata.CredentialsJSON != "" && c.Config.Sidecar.Enabled {
+		// Sidecar login with Pro/Max credentials
 		log.Info().Msg("Using sidecar backend for Pro/Max subscription")
-
 		messageClient = sidecar.NewMessageClient(
 			SidecarURL,
 			time.Duration(SidecarTimeout)*time.Second,
 			log,
 		)
-	} else {
-		// Use direct API backend (API credits)
-		if metadata.APIKey == "" {
-			return fmt.Errorf("no stored API key (required when sidecar is disabled)")
-		}
+	} else if metadata.APIKey != "" {
+		// API key login
 		log.Info().Msg("Using direct API backend")
 		messageClient = claudeapi.NewClient(metadata.APIKey, log)
+	} else if metadata.CredentialsJSON != "" && !c.Config.Sidecar.Enabled {
+		return fmt.Errorf("sidecar login but sidecar is disabled in config")
+	} else {
+		return fmt.Errorf("no API key or credentials found in login metadata")
 	}
 
 	claudeClient := &ClaudeClient{
