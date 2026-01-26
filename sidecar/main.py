@@ -1174,18 +1174,56 @@ async def oauth_complete(request: OAuthCompleteRequest):
         except Exception as e:
             logger.debug(f"Could not list config dir: {e}")
 
-        # Check for credentials - try custom config dir first, then default location
+        # Parse output for token or check for credentials file
+        # setup-token outputs the token to stdout, not to a file
         credentials_json = None
         creds_source = None
 
-        if creds_file.exists():
+        # Clean output for parsing
+        decoded_output = output.decode('utf-8', errors='ignore')
+        clean_output = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', decoded_output)  # CSI sequences
+        clean_output = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean_output)  # OSC sequences
+        clean_output = re.sub(r'\x1b.', '', clean_output)  # Other escapes
+
+        # Log full output for debugging (first 2000 chars, this is where token would be)
+        logger.debug(f"OAuth full output (first 2000 chars): {clean_output[:2000]}")
+
+        # Look for the actual OAuth token in output
+        # Pattern: token line after "export CLAUDE_CODE_OAUTH_TOKEN=" or similar
+        # The token is a long string (not the placeholder "<token>")
+        # OAuth tokens are typically JWT-like: base64 or alphanumeric with dots/underscores
+        token_patterns = [
+            # Token on its own line (common output format)
+            r'\n([A-Za-z0-9_\-]{50,})\n',
+            # export CLAUDE_CODE_OAUTH_TOKEN=actualtoken
+            r'CLAUDE_CODE_OAUTH_TOKEN=([A-Za-z0-9_\-\.]{50,})',
+            # Token might be after a colon or equals
+            r'token[:\s]+([A-Za-z0-9_\-\.]{50,})',
+        ]
+
+        for pattern in token_patterns:
+            match = re.search(pattern, clean_output, re.IGNORECASE)
+            if match:
+                oauth_token = match.group(1)
+                # Validate it's not a placeholder
+                if oauth_token and oauth_token != '<token>' and len(oauth_token) > 50:
+                    credentials_json = json.dumps({
+                        "claudeAiOauth": {
+                            "token": oauth_token
+                        }
+                    })
+                    creds_source = "stdout_token"
+                    logger.info(f"Extracted OAuth token from CLI output (length={len(oauth_token)})")
+                    break
+
+        # Fallback: check credentials file (some versions may write to file)
+        if not credentials_json and creds_file.exists():
             credentials_json = creds_file.read_text()
             creds_source = "custom"
-        elif default_creds.exists():
-            # Check if default location was modified recently
+        elif not credentials_json and default_creds.exists():
             try:
                 mtime = default_creds.stat().st_mtime
-                if time.time() - mtime < 120:  # Modified in last 2 minutes
+                if time.time() - mtime < 120:
                     credentials_json = default_creds.read_text()
                     creds_source = "default"
                     logger.warning(f"Credentials found at default location instead of {config_dir}")
@@ -1207,21 +1245,13 @@ async def oauth_complete(request: OAuthCompleteRequest):
                 message="Login successful! Your credentials have been saved."
             )
         else:
-            # Parse output for error details
-            decoded = output.decode('utf-8', errors='ignore')
-            # Remove ANSI escape codes
-            clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', decoded)
-            clean = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean)
-            clean = re.sub(r'\x1b.', '', clean)
-
-            # Log full cleaned output for debugging
-            logger.error(f"OAuth failed - no credentials file at {creds_file} or {default_creds}")
-            logger.error(f"Config dir: {config_dir}")
-            logger.error(f"Output length: {len(output)} bytes, cleaned: {len(clean)} chars")
-            if clean:
-                logger.error(f"OAuth output (last 1000 chars): {clean[-1000:]}")
-            else:
-                logger.error("OAuth output was empty!")
+            # Log debugging info - no token found and no credentials file
+            logger.error(f"OAuth failed - no token in output and no credentials file")
+            logger.error(f"Config dir: {config_dir}, creds_file exists: {creds_file.exists()}")
+            logger.error(f"Output length: {len(output)} bytes, cleaned: {len(clean_output)} chars")
+            # Log full output to help debug token format
+            logger.error(f"OAuth output (first 1500 chars): {clean_output[:1500]}")
+            logger.error(f"OAuth output (last 500 chars): {clean_output[-500:]}")
 
             # Clean up config directory
             shutil.rmtree(config_dir, ignore_errors=True)
