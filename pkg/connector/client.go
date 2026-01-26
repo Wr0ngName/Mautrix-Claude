@@ -488,14 +488,24 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		systemPrompt = c.Connector.Config.GetSystemPrompt()
 	}
 
-	// Build messages for API request: existing history + new user message
-	// Don't add to conversation history yet - only after successful API response
-	existingMessages := convMgr.GetMessages()
+	// Build messages for API request
+	// For sidecar mode: only send current message (sidecar handles history via session resume)
+	// For API mode: send existing history + new user message
 	userMessage := claudeapi.Message{
 		Role:    "user",
 		Content: messageContent,
 	}
-	messagesForAPI := append(existingMessages, userMessage)
+
+	var messagesForAPI []claudeapi.Message
+	isSidecarMode := c.MessageClient.GetClientType() == "sidecar"
+	if isSidecarMode {
+		// Sidecar handles conversation history via Agent SDK session resume
+		messagesForAPI = []claudeapi.Message{userMessage}
+	} else {
+		// API mode: include local conversation history
+		existingMessages := convMgr.GetMessages()
+		messagesForAPI = append(existingMessages, userMessage)
+	}
 
 	req := &claudeapi.CreateMessageRequest{
 		Model:       model,
@@ -574,20 +584,24 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		return nil, errors.New(errMsg)
 	}
 
-	// Only add messages to conversation history AFTER successful API response
-	// This prevents conversation state corruption if API fails
-	convMgr.AddMessageWithContent("user", messageContent, userMsgID)
-	convMgr.AddMessageWithID("assistant", responseContent, claudeMessageID)
+	// Only track conversation history locally for API mode
+	// Sidecar mode handles history via Agent SDK session resume
+	if !isSidecarMode {
+		// Add messages to conversation history AFTER successful API response
+		// This prevents conversation state corruption if API fails
+		convMgr.AddMessageWithContent("user", messageContent, userMsgID)
+		convMgr.AddMessageWithID("assistant", responseContent, claudeMessageID)
 
-	c.Connector.Log.Debug().
-		Str("portal_id", string(msg.Portal.PortalKey.ID)).
-		Int("message_count", convMgr.MessageCount()).
-		Int("estimated_tokens", convMgr.EstimatedTokens()).
-		Msg("Added messages to conversation history")
+		c.Connector.Log.Debug().
+			Str("portal_id", string(msg.Portal.PortalKey.ID)).
+			Int("message_count", convMgr.MessageCount()).
+			Int("estimated_tokens", convMgr.EstimatedTokens()).
+			Msg("Added messages to conversation history")
 
-	// Trim conversation if needed
-	if err := convMgr.TrimToTokenLimit(); err != nil {
-		c.Connector.Log.Warn().Err(err).Msg("Failed to trim conversation")
+		// Trim conversation if needed
+		if err := convMgr.TrimToTokenLimit(); err != nil {
+			c.Connector.Log.Warn().Err(err).Msg("Failed to trim conversation")
+		}
 	}
 
 	// Queue the assistant's response as an incoming message

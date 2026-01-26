@@ -58,18 +58,93 @@ Only safe tools are enabled by default:
 - Task, TodoWrite, TodoRead
 - NotebookEdit
 
+## Setup: Claude Code Authentication
+
+Before using sidecar mode, you must authenticate Claude Code on the host machine:
+
+### Step 1: Install Claude Code CLI
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+### Step 2: Authenticate
+
+Run the Claude Code CLI and complete the authentication:
+
+```bash
+claude
+```
+
+This will:
+1. Open a browser for Anthropic authentication
+2. Link your Pro/Max subscription
+3. Save credentials to `~/.claude/`
+
+### Step 3: Verify Authentication
+
+```bash
+echo "Hello" | claude -p "Say hi"
+```
+
+If this works, authentication is set up correctly.
+
 ## Usage
 
-Run the container with sidecar mode:
+### Docker Run
 
 ```bash
 docker run -v ./data:/data \
   -v ~/.claude:/home/bridge/.claude:ro \
-  -e ENABLE_SIDECAR=true \
   mautrix-claude
 ```
 
-The `~/.claude` mount provides the Claude Code authentication for Pro/Max subscriptions.
+The `~/.claude` mount provides the Claude Code authentication credentials.
+
+### Docker Compose
+
+```yaml
+services:
+  mautrix-claude:
+    image: mautrix-claude
+    volumes:
+      - ./data:/data
+      - ~/.claude:/home/bridge/.claude:ro
+    restart: unless-stopped
+```
+
+### Configuration
+
+Enable sidecar mode in your `config.yaml`:
+
+```yaml
+claude:
+  sidecar:
+    enabled: true
+```
+
+## Troubleshooting
+
+### "Claude Code is not authenticated"
+
+If you see this error on startup:
+1. Verify `~/.claude` exists and contains credentials
+2. Re-run `claude` on the host to re-authenticate
+3. Ensure the volume mount is correct (`:ro` for read-only)
+
+### "Circuit breaker open"
+
+The sidecar has detected repeated failures:
+1. Check Claude Code authentication
+2. Verify Anthropic API status
+3. Wait 30 seconds for circuit to reset
+
+### "Sidecar health check failed"
+
+The Go bridge cannot reach the sidecar:
+1. Check container logs for Python errors
+2. Verify sidecar is enabled in config
+3. Check for port conflicts on 8090
 
 ## API Endpoints (Internal)
 

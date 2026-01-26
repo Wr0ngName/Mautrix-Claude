@@ -9,9 +9,28 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
+)
+
+// Retry and circuit breaker configuration
+const (
+	maxRetries       = 3
+	initialBackoff   = 100 * time.Millisecond
+	maxBackoff       = 5 * time.Second
+	circuitThreshold = 5                // failures before opening circuit
+	circuitTimeout   = 30 * time.Second // time before trying again
+)
+
+// CircuitState represents the state of the circuit breaker
+type CircuitState int
+
+const (
+	CircuitClosed CircuitState = iota
+	CircuitOpen
+	CircuitHalfOpen
 )
 
 // Client is an HTTP client for the Claude Agent SDK sidecar.
@@ -19,6 +38,12 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	log        zerolog.Logger
+
+	// Circuit breaker state
+	mu               sync.Mutex
+	circuitState     CircuitState
+	consecutiveFails int
+	lastFailTime     time.Time
 }
 
 // ChatRequest is the request body for the chat endpoint.
@@ -64,8 +89,74 @@ func NewClient(baseURL string, timeout time.Duration, log zerolog.Logger) *Clien
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		log: log.With().Str("component", "sidecar-client").Logger(),
+		log:          log.With().Str("component", "sidecar-client").Logger(),
+		circuitState: CircuitClosed,
 	}
+}
+
+// checkCircuit checks if a request should be allowed based on circuit state.
+// Returns true if request should proceed, false if circuit is open.
+func (c *Client) checkCircuit() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	switch c.circuitState {
+	case CircuitOpen:
+		// Check if timeout has passed
+		if time.Since(c.lastFailTime) >= circuitTimeout {
+			c.circuitState = CircuitHalfOpen
+			c.log.Info().Msg("Circuit breaker: half-open, allowing test request")
+			return true
+		}
+		return false
+	case CircuitHalfOpen, CircuitClosed:
+		return true
+	}
+	return true
+}
+
+// recordSuccess records a successful request.
+func (c *Client) recordSuccess() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.consecutiveFails = 0
+	if c.circuitState == CircuitHalfOpen {
+		c.circuitState = CircuitClosed
+		c.log.Info().Msg("Circuit breaker: closed (recovered)")
+	}
+}
+
+// recordFailure records a failed request.
+func (c *Client) recordFailure() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.consecutiveFails++
+	c.lastFailTime = time.Now()
+
+	if c.consecutiveFails >= circuitThreshold && c.circuitState != CircuitOpen {
+		c.circuitState = CircuitOpen
+		c.log.Warn().Int("failures", c.consecutiveFails).Msg("Circuit breaker: opened due to consecutive failures")
+	}
+}
+
+// isRetryable checks if an error or status code is retryable.
+func isRetryable(err error, statusCode int) bool {
+	if err != nil {
+		return true // Network errors are retryable
+	}
+	// Retry on 5xx server errors and 429 rate limit
+	return statusCode >= 500 || statusCode == 429
+}
+
+// backoff calculates exponential backoff duration.
+func backoff(attempt int) time.Duration {
+	delay := initialBackoff * time.Duration(1<<uint(attempt))
+	if delay > maxBackoff {
+		delay = maxBackoff
+	}
+	return delay
 }
 
 // Health checks if the sidecar is healthy.
@@ -95,7 +186,13 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 }
 
 // Chat sends a message to Claude and returns the response.
+// Includes retry logic with exponential backoff and circuit breaker protection.
 func (c *Client) Chat(ctx context.Context, portalID, message string, systemPrompt, model *string) (*ChatResponse, error) {
+	// Check circuit breaker
+	if !c.checkCircuit() {
+		return nil, fmt.Errorf("circuit breaker open: sidecar temporarily unavailable")
+	}
+
 	reqBody := ChatRequest{
 		PortalID:     portalID,
 		Message:      message,
@@ -114,37 +211,70 @@ func (c *Client) Chat(ctx context.Context, portalID, message string, systemPromp
 		Str("message_preview", truncate(message, 50)).
 		Msg("Sending chat request to sidecar")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/chat", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
+	var lastErr error
 	startTime := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := backoff(attempt - 1)
+			c.log.Debug().Int("attempt", attempt+1).Dur("backoff", delay).Msg("Retrying chat request")
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/chat", bytes.NewReader(jsonBody))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to make request: %w", err)
+			if isRetryable(err, 0) && attempt < maxRetries {
+				continue
+			}
+			c.recordFailure()
+			return nil, lastErr
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("chat request failed: %s - %s", resp.Status, string(body))
+			if isRetryable(nil, resp.StatusCode) && attempt < maxRetries {
+				continue
+			}
+			c.recordFailure()
+			return nil, lastErr
+		}
+
+		var chatResp ChatResponse
+		if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+		resp.Body.Close()
+
+		// Success - record and return
+		c.recordSuccess()
+
+		c.log.Debug().
+			Str("portal_id", portalID).
+			Str("session_id", chatResp.SessionID).
+			Dur("duration", time.Since(startTime)).
+			Int("attempts", attempt+1).
+			Str("response_preview", truncate(chatResp.Response, 50)).
+			Msg("Received chat response from sidecar")
+
+		return &chatResp, nil
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("chat request failed: %s - %s", resp.Status, string(body))
-	}
-
-	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	c.log.Debug().
-		Str("portal_id", portalID).
-		Str("session_id", chatResp.SessionID).
-		Dur("duration", time.Since(startTime)).
-		Str("response_preview", truncate(chatResp.Response, 50)).
-		Msg("Received chat response from sidecar")
-
-	return &chatResp, nil
+	c.recordFailure()
+	return nil, lastErr
 }
 
 // DeleteSession clears the conversation history for a portal.

@@ -233,13 +233,51 @@ class SessionManager:
 session_manager = SessionManager()
 
 
+async def validate_claude_auth() -> bool:
+    """Validate that Claude Code is authenticated by making a test query."""
+    try:
+        logger.info("Validating Claude Code authentication...")
+        options = ClaudeAgentOptions(
+            allowed_tools=[],  # No tools for validation
+            permission_mode="bypassPermissions",
+            model=MODEL,
+            max_turns=1,  # Single turn only
+        )
+
+        # Simple test query
+        async for message in query(prompt="Say 'OK' and nothing else.", options=options):
+            if hasattr(message, 'result'):
+                logger.info("Claude Code authentication validated successfully")
+                return True
+
+        logger.warning("Auth validation: no result received")
+        return False
+    except Exception as e:
+        logger.error(f"Claude Code authentication failed: {e}")
+        return False
+
+
+# Track auth status globally
+_auth_validated = False
+
+
 @app.on_event("startup")
 async def startup():
     """Start session manager on app startup."""
+    global _auth_validated
+
     await session_manager.start()
-    logger.info(f"Claude sidecar started on port {PORT}")
+    logger.info(f"Claude sidecar starting on port {PORT}")
     logger.info(f"Allowed tools: {ALLOWED_TOOLS or 'none (chat only)'}")
     logger.info(f"Model: {MODEL}")
+
+    # Validate Claude Code authentication
+    _auth_validated = await validate_claude_auth()
+    if not _auth_validated:
+        logger.error("WARNING: Claude Code is not authenticated!")
+        logger.error("Run 'claude' to authenticate before using sidecar mode")
+    else:
+        logger.info("Claude sidecar ready")
 
 
 @app.on_event("shutdown")
@@ -252,7 +290,12 @@ async def shutdown():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy", "sessions": len(session_manager.sessions)}
+    status = "healthy" if _auth_validated else "unhealthy"
+    return {
+        "status": status,
+        "sessions": len(session_manager.sessions),
+        "authenticated": _auth_validated
+    }
 
 
 @app.get("/metrics")
