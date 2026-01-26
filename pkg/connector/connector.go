@@ -296,7 +296,7 @@ type UserLoginMetadata struct {
 // This is called by the framework during ghost DM invite handling.
 func (c *ClaudeConnector) ValidateUserID(id networkid.UserID) bool {
 	switch string(id) {
-	case "sonnet", "opus", "haiku", "error", "unknown":
+	case "sonnet", "opus", "haiku", "error":
 		return true
 	default:
 		return false

@@ -99,6 +99,7 @@ func ValidateModel(ctx context.Context, apiKey string, modelID string) error {
 }
 
 // inferModelFamily infers the model family from the model ID.
+// Falls back to "sonnet" for unrecognized models since it's the most common family.
 func inferModelFamily(modelID string) string {
 	id := strings.ToLower(modelID)
 	switch {
@@ -109,7 +110,9 @@ func inferModelFamily(modelID string) string {
 	case strings.Contains(id, "haiku"):
 		return "haiku"
 	default:
-		return "unknown"
+		// Default to sonnet for unrecognized models - it's the most common family
+		// and avoids creating invalid ghost users like @claude_unknown
+		return "sonnet"
 	}
 }
 
