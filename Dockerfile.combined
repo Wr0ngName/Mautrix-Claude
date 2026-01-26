@@ -1,0 +1,109 @@
+# Combined mautrix-claude + Claude Agent SDK Sidecar
+# Single container with Go bridge + Python sidecar
+#
+# Supports both:
+# - API mode (direct Anthropic API with API key)
+# - Sidecar mode (Agent SDK with Pro/Max subscription)
+#
+# Usage:
+#   API mode (default):
+#     docker run -v ./data:/data mautrix-claude
+#
+#   Sidecar mode (Pro/Max):
+#     docker run -v ./data:/data -v ~/.claude:/home/bridge/.claude:ro \
+#       -e ENABLE_SIDECAR=true mautrix-claude
+
+# ============== Stage 1: Build Go binary ==============
+FROM golang:1.23-alpine AS go-builder
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -tags "goolm" -o mautrix-claude ./cmd/mautrix-claude
+
+# ============== Stage 2: Final image ==============
+FROM python:3.11-slim
+
+# Install Node.js (required for Claude Code / Agent SDK)
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    supervisor \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI (for Pro/Max authentication)
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create non-root user
+RUN useradd -m -u 1000 bridge && \
+    mkdir -p /data /app/sidecar /home/bridge/.claude && \
+    chown -R bridge:bridge /data /app /home/bridge
+
+WORKDIR /app
+
+# Copy Go binary
+COPY --from=go-builder /build/mautrix-claude /app/
+
+# Copy and install Python sidecar
+COPY sidecar/requirements.txt /app/sidecar/
+RUN pip install --no-cache-dir -r /app/sidecar/requirements.txt
+
+COPY sidecar/main.py /app/sidecar/
+
+# Create startup script that handles both modes
+RUN cat > /app/start.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+
+if [ "$ENABLE_SIDECAR" = "true" ]; then
+    echo "Starting in SIDECAR mode (Pro/Max subscription)"
+    # Start sidecar in background
+    python /app/sidecar/main.py &
+    SIDECAR_PID=$!
+
+    # Wait for sidecar to be ready
+    for i in {1..30}; do
+        if curl -sf http://localhost:8090/health > /dev/null 2>&1; then
+            echo "Sidecar is ready"
+            break
+        fi
+        echo "Waiting for sidecar... ($i/30)"
+        sleep 1
+    done
+
+    # Start bridge
+    exec /app/mautrix-claude -c /data/config.yaml
+else
+    echo "Starting in API mode (direct API)"
+    exec /app/mautrix-claude -c /data/config.yaml
+fi
+SCRIPT
+RUN chmod +x /app/start.sh
+
+# Environment defaults
+ENV ENABLE_SIDECAR=false
+ENV CLAUDE_SIDECAR_PORT=8090
+ENV CLAUDE_SIDECAR_ALLOWED_TOOLS="WebSearch,WebFetch,AskUserQuestion"
+ENV CLAUDE_SIDECAR_MODEL="sonnet"
+
+# Switch to non-root user
+USER bridge
+
+# Volumes
+VOLUME /data
+
+# Expose ports (bridge + sidecar internal)
+EXPOSE 29320
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -sf http://localhost:29320/_health || exit 1
+
+# Run startup script
+CMD ["/app/start.sh"]

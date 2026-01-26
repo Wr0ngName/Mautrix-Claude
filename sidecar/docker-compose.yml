@@ -1,0 +1,52 @@
+# Claude Agent SDK Sidecar - Docker Compose
+# Run alongside mautrix-claude bridge for Pro/Max subscription support
+
+version: "3.8"
+
+services:
+  claude-sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-sidecar
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      # Port for HTTP API
+      CLAUDE_SIDECAR_PORT: "8090"
+      # Allowed tools (safe defaults: web search only, no file/code access)
+      CLAUDE_SIDECAR_ALLOWED_TOOLS: "WebSearch,WebFetch,AskUserQuestion"
+      # Default system prompt
+      CLAUDE_SIDECAR_SYSTEM_PROMPT: "You are a helpful AI assistant."
+      # Model to use (sonnet, opus, haiku)
+      CLAUDE_SIDECAR_MODEL: "sonnet"
+      # Session timeout in seconds (1 hour)
+      CLAUDE_SIDECAR_SESSION_TIMEOUT: "3600"
+    volumes:
+      # Mount Claude Code auth config (read-only for security)
+      - ~/.claude:/home/claude/.claude:ro
+    # Security: no privileged access
+    security_opt:
+      - no-new-privileges:true
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - claude-net
+
+networks:
+  claude-net:
+    driver: bridge

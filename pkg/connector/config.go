@@ -45,6 +45,21 @@ type Config struct {
 
 	// RateLimitPerMinute is the rate limit (0 = unlimited)
 	RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
+
+	// Sidecar configuration for Pro/Max subscription support
+	Sidecar SidecarConfig `yaml:"sidecar"`
+}
+
+// SidecarConfig contains configuration for the Agent SDK sidecar.
+type SidecarConfig struct {
+	// Enabled enables the sidecar backend instead of direct API
+	Enabled bool `yaml:"enabled"`
+
+	// URL is the sidecar HTTP endpoint (default: http://localhost:8090)
+	URL string `yaml:"url"`
+
+	// Timeout is the request timeout in seconds (default: 300)
+	Timeout int `yaml:"timeout"`
 }
 
 // ExampleConfig is the example configuration for the connector.
@@ -75,6 +90,17 @@ conversation_max_age_hours: 24
 # Rate limiting (requests per minute, 0 = unlimited)
 # Helps prevent API rate limit errors
 rate_limit_per_minute: 60
+
+# Sidecar configuration for Pro/Max subscription support
+# When enabled, uses the Claude Agent SDK sidecar instead of direct API
+# This allows using Pro/Max subscriptions instead of API credits
+sidecar:
+    # Enable sidecar mode (requires sidecar service running)
+    enabled: false
+    # Sidecar URL (default: http://localhost:8090 for same-container deployment)
+    url: http://localhost:8090
+    # Request timeout in seconds
+    timeout: 300
 `
 
 // Validate validates the configuration.
@@ -207,4 +233,20 @@ func ValidateModelID(modelID string) error {
 // Useful for setting temperature in config.
 func TemperaturePtr(t float64) *float64 {
 	return &t
+}
+
+// GetSidecarURL returns the sidecar URL with default if not set.
+func (c *SidecarConfig) GetSidecarURL() string {
+	if c.URL == "" {
+		return "http://localhost:8090"
+	}
+	return c.URL
+}
+
+// GetSidecarTimeout returns the sidecar timeout with default if not set.
+func (c *SidecarConfig) GetSidecarTimeout() int {
+	if c.Timeout <= 0 {
+		return 300 // 5 minutes default
+	}
+	return c.Timeout
 }

@@ -4,6 +4,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
@@ -13,6 +14,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
+	"go.mau.fi/mautrix-claude/pkg/sidecar"
 )
 
 // ClaudeConnector implements the bridgev2.NetworkConnector interface for Claude API.
@@ -149,14 +151,31 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 
 	log := c.Log.With().Str("user", string(login.UserMXID)).Logger()
 
-	if metadata.APIKey == "" {
-		return fmt.Errorf("no stored API key")
+	var messageClient claudeapi.MessageClient
+
+	// Choose backend based on config
+	if c.Config.Sidecar.Enabled {
+		// Use sidecar backend (Pro/Max subscription via Agent SDK)
+		log.Info().
+			Str("sidecar_url", c.Config.Sidecar.GetSidecarURL()).
+			Msg("Using sidecar backend for Pro/Max subscription")
+
+		messageClient = sidecar.NewMessageClient(
+			c.Config.Sidecar.GetSidecarURL(),
+			time.Duration(c.Config.Sidecar.GetSidecarTimeout())*time.Second,
+			log,
+		)
+	} else {
+		// Use direct API backend (API credits)
+		if metadata.APIKey == "" {
+			return fmt.Errorf("no stored API key (required when sidecar is disabled)")
+		}
+		log.Info().Msg("Using direct API backend")
+		messageClient = claudeapi.NewClient(metadata.APIKey, log)
 	}
 
-	client := claudeapi.NewClient(metadata.APIKey, log)
-
 	claudeClient := &ClaudeClient{
-		MessageClient: client,
+		MessageClient: messageClient,
 		UserLogin:     login,
 		Connector:     c,
 		conversations: make(map[networkid.PortalID]*claudeapi.ConversationManager),
