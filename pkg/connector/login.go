@@ -129,10 +129,16 @@ var _ bridgev2.LoginProcess = (*SidecarLogin)(nil)
 
 // Start begins the sidecar login flow.
 func (s *SidecarLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
-	// Verify sidecar is healthy before allowing login
+	// Verify sidecar is healthy and authenticated before allowing login
 	client := s.Connector.getSidecarClient()
 	if err := client.Validate(ctx); err != nil {
-		return nil, fmt.Errorf("sidecar not available: %w", err)
+		// Provide helpful error message for admin
+		return nil, fmt.Errorf("sidecar not ready: %w\n\n"+
+			"The bridge admin needs to set up Claude Code credentials:\n"+
+			"1. On a machine with a browser, run: claude\n"+
+			"2. Complete the OAuth authentication\n"+
+			"3. Copy credentials to the bridge: cp -r ~/.claude/* /data/.claude/\n"+
+			"4. Restart the bridge container", err)
 	}
 
 	// Generate a unique login ID for this user
