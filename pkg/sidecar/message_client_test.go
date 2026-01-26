@@ -32,7 +32,7 @@ func TestNewMessageClient(t *testing.T) {
 
 func TestMessageClientGetClientType(t *testing.T) {
 	client := NewMessageClient("http://localhost:8090", 5*time.Minute, zerolog.Nop())
-	
+
 	if clientType := client.GetClientType(); clientType != "sidecar" {
 		t.Errorf("Expected client type 'sidecar', got '%s'", clientType)
 	}
@@ -40,7 +40,7 @@ func TestMessageClientGetClientType(t *testing.T) {
 
 func TestMessageClientGetMetrics(t *testing.T) {
 	client := NewMessageClient("http://localhost:8090", 5*time.Minute, zerolog.Nop())
-	
+
 	metrics := client.GetMetrics()
 	if metrics == nil {
 		t.Error("GetMetrics returned nil")
@@ -156,7 +156,7 @@ func TestCreateMessage(t *testing.T) {
 			serverResponse: func(w http.ResponseWriter, r *http.Request) {
 				var chatReq ChatRequest
 				json.NewDecoder(r.Body).Decode(&chatReq)
-				
+
 				if chatReq.SystemPrompt == nil {
 					t.Error("SystemPrompt should be set")
 				}
@@ -242,7 +242,7 @@ func TestCreateMessage(t *testing.T) {
 
 func TestCreateMessageWithPortalID(t *testing.T) {
 	receivedPortalID := ""
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var chatReq ChatRequest
 		json.NewDecoder(r.Body).Decode(&chatReq)
@@ -497,7 +497,7 @@ func TestCreateMessageStreamMetrics(t *testing.T) {
 
 func TestClearSession(t *testing.T) {
 	called := false
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		if r.Method != "DELETE" {
@@ -710,7 +710,7 @@ func TestEstimateTokens(t *testing.T) {
 
 func TestWithPortalID(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Without portal ID
 	if val := ctx.Value(portalIDKey); val != nil {
 		t.Error("Expected nil portal ID in base context")
@@ -719,16 +719,16 @@ func TestWithPortalID(t *testing.T) {
 	// With portal ID
 	ctx = WithPortalID(ctx, "test-portal-123")
 	val := ctx.Value(portalIDKey)
-	
+
 	if val == nil {
 		t.Error("Expected non-nil portal ID")
 	}
-	
+
 	portalID, ok := val.(string)
 	if !ok {
 		t.Error("Portal ID should be string type")
 	}
-	
+
 	if portalID != "test-portal-123" {
 		t.Errorf("Expected portal ID 'test-portal-123', got '%s'", portalID)
 	}
@@ -888,7 +888,7 @@ func BenchmarkExtractMessageText(b *testing.B) {
 
 func BenchmarkEstimateTokens(b *testing.B) {
 	text := "This is a sample text that we will use to benchmark the token estimation function."
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = estimateTokens(text)

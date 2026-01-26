@@ -236,4 +236,3 @@ func ValidateModelID(modelID string) error {
 func TemperaturePtr(t float64) *float64 {
 	return &t
 }
-

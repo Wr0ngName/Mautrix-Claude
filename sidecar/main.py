@@ -176,6 +176,7 @@ class ChatResponse(BaseModel):
     portal_id: str
     session_id: str
     response: str
+    model: str  # Actual model used for this request
     tokens_used: Optional[int] = None
 
 
@@ -524,11 +525,14 @@ async def chat(request: ChatRequest):
                 except ValueError as e:
                     raise HTTPException(status_code=400, detail=str(e))
 
+            # Determine actual model to use
+            actual_model = request.model or MODEL
+
             # Build options
             options = ClaudeAgentOptions(
                 allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
                 permission_mode="bypassPermissions",  # No interactive prompts
-                model=request.model or MODEL,
+                model=actual_model,
             )
 
             # Resume session if not first message
@@ -574,6 +578,7 @@ async def chat(request: ChatRequest):
                 portal_id=request.portal_id,
                 session_id=session.session_id,
                 response=response_text,
+                model=actual_model,
                 tokens_used=tokens_used if tokens_used > 0 else None
             )
 
@@ -625,10 +630,13 @@ async def chat_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
                         return
 
+                # Determine actual model to use
+                actual_model = request.model or MODEL
+
                 options = ClaudeAgentOptions(
                     allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
                     permission_mode="bypassPermissions",
-                    model=request.model or MODEL,
+                    model=actual_model,
                 )
 
                 if session.message_count > 0:
@@ -643,7 +651,7 @@ async def chat_stream(request: ChatRequest):
                     if hasattr(message, 'subtype') and message.subtype == 'init':
                         if hasattr(message, 'data') and 'session_id' in message.data:
                             session.session_id = message.data['session_id']
-                            yield f"data: {{\"type\": \"session\", \"session_id\": \"{session.session_id}\"}}\n\n"
+                            yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model})}\n\n"
 
                     # Stream assistant messages
                     if hasattr(message, 'type') and message.type == 'assistant':

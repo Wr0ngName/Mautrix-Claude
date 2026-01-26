@@ -306,10 +306,32 @@ func (c *ClaudeConnector) ValidateUserID(id networkid.UserID) bool {
 // MakeClaudeGhostID creates a network user ID from a model name.
 // Returns just the family name (e.g., "sonnet", "opus", "haiku") since the
 // username_template in config already adds the "claude_" prefix.
+// Uses the default model from config as fallback if family cannot be determined.
+func (c *ClaudeConnector) MakeClaudeGhostID(model string) networkid.UserID {
+	family := claudeapi.GetModelFamily(model)
+	if family == "" {
+		// Fallback to default model's family from config
+		defaultModel := c.Config.GetDefaultModel()
+		family = claudeapi.GetModelFamily(defaultModel)
+		if family == "" {
+			// Last resort: default to sonnet if even config model is unrecognizable
+			family = "sonnet"
+			c.Log.Warn().
+				Str("model", model).
+				Str("default_model", defaultModel).
+				Msg("Could not determine model family, defaulting to sonnet")
+		}
+	}
+	return networkid.UserID(family)
+}
+
+// MakeClaudeGhostIDStatic creates a network user ID from a model name (static version).
+// Prefer the method version when ClaudeConnector is available for proper fallback handling.
 func MakeClaudeGhostID(model string) networkid.UserID {
 	family := claudeapi.GetModelFamily(model)
 	if family == "" {
-		family = model
+		// Without config access, default to sonnet
+		family = "sonnet"
 	}
 	return networkid.UserID(family)
 }

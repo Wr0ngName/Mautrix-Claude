@@ -105,6 +105,12 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			return
 		}
 
+		// Use actual model from response (sidecar tells us what was used)
+		actualModel := resp.Model
+		if actualModel == "" {
+			actualModel = req.Model // Fallback to request model if response is empty
+		}
+
 		// Send content as a single block
 		events <- claudeapi.StreamEvent{
 			Type: "content_block_delta",
@@ -121,9 +127,10 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			m.metrics.TotalOutputTokens.Add(int64(*resp.TokensUsed))
 		}
 
-		// Send message_delta with usage
+		// Send message_delta with usage and actual model
 		events <- claudeapi.StreamEvent{
-			Type: "message_delta",
+			Type:  "message_delta",
+			Model: actualModel, // Include actual model for ghost ID resolution
 			Usage: &claudeapi.Usage{
 				OutputTokens: estimateTokens(resp.Response),
 			},
@@ -136,7 +143,7 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 
 		// Record successful request
 		outputTokens := estimateTokens(resp.Response)
-		m.metrics.RecordRequest(req.Model, time.Since(startTime), 0, outputTokens)
+		m.metrics.RecordRequest(actualModel, time.Since(startTime), 0, outputTokens)
 	}()
 
 	return events, nil
@@ -185,14 +192,20 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 		return nil, err
 	}
 
+	// Use actual model from response (sidecar tells us what was used)
+	actualModel := resp.Model
+	if actualModel == "" {
+		actualModel = req.Model // Fallback to request model if response is empty
+	}
+
 	outputTokens := estimateTokens(resp.Response)
-	m.metrics.RecordRequest(req.Model, time.Since(startTime), 0, outputTokens)
+	m.metrics.RecordRequest(actualModel, time.Since(startTime), 0, outputTokens)
 
 	return &claudeapi.CreateMessageResponse{
 		ID:      resp.SessionID,
 		Type:    "message",
 		Role:    "assistant",
-		Model:   req.Model,
+		Model:   actualModel,
 		Content: []claudeapi.Content{{Type: "text", Text: resp.Response}},
 		Usage: &claudeapi.Usage{
 			OutputTokens: outputTokens,

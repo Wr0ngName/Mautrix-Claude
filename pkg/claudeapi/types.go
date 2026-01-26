@@ -65,6 +65,7 @@ type StreamEvent struct {
 	Index   int                    `json:"index,omitempty"`
 	Delta   *ContentDelta          `json:"delta,omitempty"`
 	Message *CreateMessageResponse `json:"message,omitempty"`
+	Model   string                 `json:"model,omitempty"` // Actual model used (for sidecar responses)
 	Usage   *Usage                 `json:"usage,omitempty"`
 	Error   *StreamError           `json:"error,omitempty"` // Error details for "error" type events
 }

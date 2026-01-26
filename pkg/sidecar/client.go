@@ -62,6 +62,7 @@ type ChatResponse struct {
 	PortalID   string `json:"portal_id"`
 	SessionID  string `json:"session_id"`
 	Response   string `json:"response"`
+	Model      string `json:"model"` // Actual model used for this request
 	TokensUsed *int   `json:"tokens_used,omitempty"`
 }
 

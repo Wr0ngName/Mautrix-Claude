@@ -208,7 +208,7 @@ func TestChat(t *testing.T) {
 			serverResponse: func(w http.ResponseWriter, r *http.Request) {
 				var req ChatRequest
 				json.NewDecoder(r.Body).Decode(&req)
-				
+
 				if req.SystemPrompt == nil || *req.SystemPrompt != "You are a helpful assistant" {
 					t.Error("System prompt not properly sent")
 				}
@@ -513,7 +513,7 @@ func TestTruncate(t *testing.T) {
 func TestChatRequestMarshaling(t *testing.T) {
 	systemPrompt := "You are helpful"
 	model := "claude-3-opus-20240229"
-	
+
 	req := ChatRequest{
 		PortalID:     "portal123",
 		Message:      "Hello",
@@ -559,10 +559,10 @@ func TestHTTPClientTimeout(t *testing.T) {
 	client := NewClient(server.URL, 30*time.Second, zerolog.Nop())
 	// Override timeout for test
 	client.httpClient.Timeout = 50 * time.Millisecond
-	
+
 	ctx := context.Background()
 	_, err := client.Health(ctx)
-	
+
 	if err == nil {
 		t.Error("Expected timeout error")
 	}
@@ -574,7 +574,7 @@ func TestHTTPClientTimeout(t *testing.T) {
 func TestClientInvalidURL(t *testing.T) {
 	client := NewClient("http://invalid-host-that-does-not-exist:9999", 30*time.Second, zerolog.Nop())
 	ctx := context.Background()
-	
+
 	_, err := client.Health(ctx)
 	if err == nil {
 		t.Error("Expected error for invalid URL")
@@ -585,13 +585,13 @@ func TestChatEmptyMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
-		
+
 		if req.Message == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("empty message"))
 			return
 		}
-		
+
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(ChatResponse{Response: "ok"})
 	}))
@@ -599,7 +599,7 @@ func TestChatEmptyMessage(t *testing.T) {
 
 	client := NewClient(server.URL, 30*time.Second, zerolog.Nop())
 	ctx := context.Background()
-	
+
 	// Server should reject empty message
 	_, err := client.Chat(ctx, "portal123", "", "", "", nil, nil)
 	if err == nil {

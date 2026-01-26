@@ -185,7 +185,7 @@ func (r *RateLimiter) WaitTime() time.Duration {
 }
 
 var (
-	_ bridgev2.NetworkAPI                     = (*ClaudeClient)(nil)
+	_ bridgev2.NetworkAPI                    = (*ClaudeClient)(nil)
 	_ bridgev2.IdentifierResolvingNetworkAPI = (*ClaudeClient)(nil)
 	_ bridgev2.MembershipHandlingNetworkAPI  = (*ClaudeClient)(nil)
 )
@@ -316,7 +316,7 @@ func (c *ClaudeClient) isClaudeMentioned(msg *bridgev2.MatrixMessage) bool {
 		if meta, ok := msg.Portal.Metadata.(*PortalMetadata); ok && meta != nil && meta.Model != "" {
 			model = meta.Model
 		}
-		ghostID := MakeClaudeGhostID(model)
+		ghostID := c.Connector.MakeClaudeGhostID(model)
 		ghostMXID := fmt.Sprintf("@claude_%s:", ghostID)
 		if strings.Contains(msg.Content.FormattedBody, ghostMXID) {
 			return true
@@ -684,7 +684,7 @@ func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Por
 				return lc.Str("error_notice", "true")
 			},
 			PortalKey: portal.PortalKey,
-			Sender:    bridgev2.EventSender{Sender: MakeClaudeGhostID("error")},
+			Sender:    bridgev2.EventSender{Sender: c.Connector.MakeClaudeGhostID("error")},
 			Timestamp: time.Now(),
 		},
 		ID: networkid.MessageID(fmt.Sprintf("error_%d", time.Now().UnixNano())),
@@ -714,7 +714,7 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 		model = meta.Model
 	}
 
-	ghostID := MakeClaudeGhostID(model)
+	ghostID := c.Connector.MakeClaudeGhostID(model)
 
 	c.UserLogin.QueueRemoteEvent(&simplevent.Message[*MessageMetadata]{
 		EventMeta: simplevent.EventMeta{
@@ -973,7 +973,7 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 		return nil, fmt.Errorf("unknown identifier: %s (try 'opus', 'sonnet', 'haiku', or a full model name)", identifier)
 	}
 
-	ghostID := MakeClaudeGhostID(model)
+	ghostID := c.Connector.MakeClaudeGhostID(model)
 
 	// Get display name for the model
 	displayName := fmt.Sprintf("Claude (%s)", model)

@@ -21,7 +21,7 @@ func (c *ClaudeClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal)
 	if model == "" {
 		model = c.Connector.Config.GetDefaultModel()
 	}
-	ghostID := MakeClaudeGhostID(model)
+	ghostID := c.Connector.MakeClaudeGhostID(model)
 
 	name := meta.ConversationName
 	if name == "" {

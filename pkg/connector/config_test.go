@@ -6,9 +6,9 @@ import (
 
 func TestSidecarConfigEnabled(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  SidecarConfig
-		want    bool
+		name   string
+		config SidecarConfig
+		want   bool
 	}{
 		{
 			name:   "enabled",
@@ -543,6 +543,6 @@ func floatPtr(f float64) *float64 {
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || 
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
 		(len(s) > 0 && (s[0:len(substr)] == substr || contains(s[1:], substr))))
 }
