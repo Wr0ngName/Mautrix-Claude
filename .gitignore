@@ -1,5 +1,9 @@
+# Build artifacts
+mautrix-claude
+
+# Runtime data
+data/
 
 # Review files
 *_REVIEW*.md
 SECURITY_SUMMARY.md
-mautrix-claude
