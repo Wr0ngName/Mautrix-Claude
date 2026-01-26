@@ -53,7 +53,24 @@ func (c *ClaudeConnector) Start(ctx context.Context) error {
 		Str("system_prompt_preview", truncateString(c.Config.GetSystemPrompt(), 50)).
 		Int("conversation_max_age_hours", c.Config.ConversationMaxAge).
 		Int("rate_limit_per_minute", c.Config.GetRateLimitPerMinute()).
+		Bool("sidecar_enabled", c.Config.Sidecar.Enabled).
 		Msg("Loaded connector config")
+
+	// Validate sidecar connectivity if enabled
+	if c.Config.Sidecar.Enabled {
+		c.Log.Info().Str("url", SidecarURL).Msg("Sidecar mode enabled, checking connectivity")
+		client := sidecar.NewClient(SidecarURL, time.Duration(SidecarTimeout)*time.Second, c.Log)
+		health, err := client.Health(ctx)
+		if err != nil {
+			c.Log.Error().Err(err).Msg("Sidecar health check failed - sidecar may not be running")
+			// Don't fail startup, let LoadUserLogin handle it
+		} else {
+			c.Log.Info().
+				Str("status", health.Status).
+				Int("sessions", health.Sessions).
+				Msg("Sidecar is healthy")
+		}
+	}
 
 	// Register custom commands
 	if proc, ok := c.br.Commands.(*commands.Processor); ok {

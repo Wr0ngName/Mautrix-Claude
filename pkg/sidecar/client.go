@@ -54,12 +54,15 @@ type HealthResponse struct {
 	Sessions int    `json:"sessions"`
 }
 
-// NewClient creates a new sidecar client.
-func NewClient(baseURL string, log zerolog.Logger) *Client {
+// NewClient creates a new sidecar client with the specified timeout.
+func NewClient(baseURL string, timeout time.Duration, log zerolog.Logger) *Client {
+	if timeout <= 0 {
+		timeout = 5 * time.Minute // Default timeout for Claude responses
+	}
 	return &Client{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // Long timeout for Claude responses
+			Timeout: timeout,
 		},
 		log: log.With().Str("component", "sidecar-client").Logger(),
 	}

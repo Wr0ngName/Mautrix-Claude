@@ -31,14 +31,49 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 PORT = int(os.getenv("CLAUDE_SIDECAR_PORT", "8090"))
-# Default allowed tools: WebSearch, WebFetch, AskUserQuestion only
-# No file access, no bash, no code editing - safe for multi-user chat
-DEFAULT_ALLOWED_TOOLS = ["WebSearch", "WebFetch", "AskUserQuestion"]
-ALLOWED_TOOLS = os.getenv("CLAUDE_SIDECAR_ALLOWED_TOOLS", ",".join(DEFAULT_ALLOWED_TOOLS)).split(",")
-ALLOWED_TOOLS = [t.strip() for t in ALLOWED_TOOLS if t.strip()]
+
+# SECURITY: Whitelist of safe tools that are allowed in multi-user chat
+# NEVER add file access, bash, or code editing tools here
+SAFE_TOOLS_WHITELIST = frozenset([
+    "WebSearch",
+    "WebFetch",
+    "AskUserQuestion",
+])
+
+# SECURITY: Tools that must NEVER be enabled (file access, code execution)
+DANGEROUS_TOOLS = frozenset([
+    "Bash", "Read", "Write", "Edit", "MultiEdit",
+    "Glob", "Grep", "LS", "NotebookEdit",
+    "Task", "TodoWrite", "TodoRead",
+])
+
+def validate_tools(tools: list[str]) -> list[str]:
+    """Validate and filter tool list against whitelist. SECURITY-CRITICAL."""
+    if not tools:
+        return []
+    validated = []
+    for tool in tools:
+        tool = tool.strip()
+        if tool in DANGEROUS_TOOLS:
+            logger.warning(f"SECURITY: Blocked attempt to enable dangerous tool: {tool}")
+            continue
+        if tool not in SAFE_TOOLS_WHITELIST:
+            logger.warning(f"SECURITY: Ignoring unknown tool not in whitelist: {tool}")
+            continue
+        validated.append(tool)
+    return validated
+
+# Parse and validate allowed tools from environment
+_raw_tools = os.getenv("CLAUDE_SIDECAR_ALLOWED_TOOLS", "WebSearch,WebFetch,AskUserQuestion").split(",")
+ALLOWED_TOOLS = validate_tools(_raw_tools)
+
 SYSTEM_PROMPT = os.getenv("CLAUDE_SIDECAR_SYSTEM_PROMPT", "You are a helpful AI assistant.")
 MODEL = os.getenv("CLAUDE_SIDECAR_MODEL", "sonnet")
 SESSION_TIMEOUT = int(os.getenv("CLAUDE_SIDECAR_SESSION_TIMEOUT", "3600"))  # 1 hour
+
+# Input validation limits
+MAX_MESSAGE_LENGTH = 100000  # ~100k chars, matches Go bridge limit
+MAX_PORTAL_ID_LENGTH = 256   # Reasonable limit for portal IDs
 
 # Prometheus metrics
 REQUESTS_TOTAL = Counter('claude_sidecar_requests_total', 'Total requests', ['endpoint', 'status'])
@@ -71,6 +106,29 @@ class ChatRequest(BaseModel):
     system_prompt: Optional[str] = None
     model: Optional[str] = None
     stream: bool = False
+
+    def validate_input(self) -> None:
+        """Validate input fields. Raises HTTPException on invalid input."""
+        # Validate portal_id
+        if not self.portal_id or len(self.portal_id) > MAX_PORTAL_ID_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid portal_id: must be 1-{MAX_PORTAL_ID_LENGTH} characters"
+            )
+        # Basic portal_id format check (alphanumeric, underscore, dash, colon allowed)
+        if not all(c.isalnum() or c in '_-:!' for c in self.portal_id):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid portal_id: contains invalid characters"
+            )
+        # Validate message
+        if not self.message:
+            raise HTTPException(status_code=400, detail="Message cannot be empty")
+        if len(self.message) > MAX_MESSAGE_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Message too long: {len(self.message)} chars (max {MAX_MESSAGE_LENGTH})"
+            )
 
 
 class ChatResponse(BaseModel):
@@ -212,6 +270,9 @@ async def chat(request: ChatRequest):
     """
     start_time = time.time()
 
+    # Validate input before processing
+    request.validate_input()
+
     try:
         # Get or create session for this portal
         session = await session_manager.get_or_create(request.portal_id)
@@ -269,10 +330,14 @@ async def chat(request: ChatRequest):
             tokens_used=tokens_used if tokens_used > 0 else None
         )
 
+    except HTTPException:
+        # Re-raise HTTP exceptions (validation errors, etc.)
+        raise
     except Exception as e:
-        logger.error(f"Error processing chat request: {e}")
+        # Log full error but don't expose details to client (security)
+        logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
         REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error processing request")
 
 
 @app.post("/v1/chat/stream")
@@ -282,6 +347,9 @@ async def chat_stream(request: ChatRequest):
 
     Returns Server-Sent Events (SSE) stream.
     """
+    # Validate input before processing
+    request.validate_input()
+
     async def generate() -> AsyncIterator[str]:
         try:
             session = await session_manager.get_or_create(request.portal_id)
@@ -325,9 +393,10 @@ async def chat_stream(request: ChatRequest):
             yield "data: {\"type\": \"done\"}\n\n"
 
         except Exception as e:
-            logger.error(f"Error in stream: {e}")
+            # Log full error but don't expose details to client (security)
+            logger.error(f"Error in stream for portal {request.portal_id}: {e}", exc_info=True)
             import json
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error processing request'})}\n\n"
 
     return StreamingResponse(
         generate(),

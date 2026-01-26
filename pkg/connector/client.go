@@ -19,6 +19,7 @@ import (
 	"maunium.net/go/mautrix/format"
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
+	"go.mau.fi/mautrix-claude/pkg/sidecar"
 )
 
 // Supported image MIME types for Claude Vision API.
@@ -505,7 +506,8 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		Stream:      true, // Use streaming for better UX
 	}
 
-	// Send to Claude API
+	// Send to Claude API (add portal ID context for sidecar session isolation)
+	ctx = sidecar.WithPortalID(ctx, string(msg.Portal.PortalKey.ID))
 	stream, err := c.MessageClient.CreateMessageStream(ctx, req)
 	if err != nil {
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")

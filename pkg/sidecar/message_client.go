@@ -25,7 +25,7 @@ var _ claudeapi.MessageClient = (*MessageClient)(nil)
 // NewMessageClient creates a new sidecar-backed MessageClient.
 func NewMessageClient(baseURL string, timeout time.Duration, log zerolog.Logger) *MessageClient {
 	return &MessageClient{
-		client:  NewClient(baseURL, log),
+		client:  NewClient(baseURL, timeout, log),
 		metrics: claudeapi.NewMetrics(),
 		log:     log.With().Str("client_type", "sidecar").Logger(),
 	}
@@ -105,10 +105,11 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			},
 		}
 
-		// Track tokens if available
-		if resp.TokensUsed != nil {
-			m.metrics.TotalInputTokens.Add(int64(*resp.TokensUsed / 2))  // Rough estimate
-			m.metrics.TotalOutputTokens.Add(int64(*resp.TokensUsed / 2)) // Rough estimate
+		// Track tokens if available from sidecar
+		// Note: Sidecar returns combined total, we track as output tokens only
+		// since we don't have input/output breakdown from Agent SDK
+		if resp.TokensUsed != nil && *resp.TokensUsed > 0 {
+			m.metrics.TotalOutputTokens.Add(int64(*resp.TokensUsed))
 		}
 
 		// Send message_delta with usage
