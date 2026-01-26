@@ -45,7 +45,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gosu \
     sqlite3 \
-    procps \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -81,10 +80,9 @@ RUN chmod +x /docker-run.sh
 VOLUME /data
 WORKDIR /data
 
-# Health check - verify the bridge process is running
-# The bridge doesn't expose a health endpoint, so we check if it's accepting connections
+# Health check using mautrix built-in ready endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD pgrep -x mautrix-claude > /dev/null || exit 1
+    CMD curl -sf http://localhost:29320/_matrix/mau/ready || exit 1
 
 # Run startup script
 CMD ["/docker-run.sh"]
