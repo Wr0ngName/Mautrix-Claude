@@ -457,9 +457,11 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
 
     # Environment without browser
     env = os.environ.copy()
+    original_config = env.get('CLAUDE_CONFIG_DIR', 'unset')
     env['BROWSER'] = '/bin/false'
     env.pop('DISPLAY', None)
     env['CLAUDE_CONFIG_DIR'] = config_dir
+    logger.info(f"PTY subprocess CLAUDE_CONFIG_DIR: {config_dir} (was: {original_config})")
 
     # Find Claude CLI path
     claude_cli = _find_claude_cli()
@@ -1091,6 +1093,9 @@ async def oauth_complete(request: OAuthCompleteRequest):
         start_time = time.time()
         creds_file = Path(config_dir) / ".credentials.json"
         default_creds = Path.home() / ".claude" / ".credentials.json"
+        # Also check original CLAUDE_CONFIG_DIR (CLI might ignore our override)
+        original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        original_creds = Path(original_config_dir) / ".credentials.json" if original_config_dir else None
         success_detected = False
         error_detected = False
 
@@ -1108,6 +1113,16 @@ async def oauth_complete(request: OAuthCompleteRequest):
                     mtime = default_creds.stat().st_mtime
                     if time.time() - mtime < 60:
                         logger.info(f"Credentials file appeared at default location {default_creds}")
+                        success_detected = True
+                        break
+                except:
+                    pass
+            # Check original CLAUDE_CONFIG_DIR location
+            if original_creds and original_creds.exists():
+                try:
+                    mtime = original_creds.stat().st_mtime
+                    if time.time() - mtime < 60:
+                        logger.info(f"Credentials file appeared at original config dir {original_creds}")
                         success_detected = True
                         break
                 except:
@@ -1174,15 +1189,25 @@ async def oauth_complete(request: OAuthCompleteRequest):
         except Exception as e:
             logger.debug(f"Could not list config dir: {e}")
 
-        # Check for credentials - try custom config dir first, then default location
+        # Check for credentials - try custom config dir first, then original CLAUDE_CONFIG_DIR, then default
         credentials_json = None
         creds_source = None
 
         if creds_file.exists():
             credentials_json = creds_file.read_text()
             creds_source = "custom"
-        elif default_creds.exists():
-            # Check if default location was modified recently
+        elif original_creds and original_creds.exists():
+            # Check original CLAUDE_CONFIG_DIR (CLI might ignore our override)
+            try:
+                mtime = original_creds.stat().st_mtime
+                if time.time() - mtime < 120:  # Modified in last 2 minutes
+                    credentials_json = original_creds.read_text()
+                    creds_source = "original_config_dir"
+                    logger.info(f"Credentials found at original CLAUDE_CONFIG_DIR: {original_creds}")
+            except:
+                pass
+        if not credentials_json and default_creds.exists():
+            # Check default ~/.claude location
             try:
                 mtime = default_creds.stat().st_mtime
                 if time.time() - mtime < 120:  # Modified in last 2 minutes
@@ -1215,8 +1240,11 @@ async def oauth_complete(request: OAuthCompleteRequest):
             clean = re.sub(r'\x1b.', '', clean)
 
             # Log full cleaned output for debugging
-            logger.error(f"OAuth failed - no credentials file at {creds_file} or {default_creds}")
-            logger.error(f"Config dir: {config_dir}")
+            checked_paths = [str(creds_file), str(default_creds)]
+            if original_creds:
+                checked_paths.append(str(original_creds))
+            logger.error(f"OAuth failed - no credentials file at: {', '.join(checked_paths)}")
+            logger.error(f"Config dir: {config_dir}, original CLAUDE_CONFIG_DIR: {original_config_dir}")
             logger.error(f"Output length: {len(output)} bytes, cleaned: {len(clean)} chars")
             if clean:
                 logger.error(f"OAuth output (last 1000 chars): {clean[-1000:]}")
