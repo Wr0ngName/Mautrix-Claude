@@ -94,12 +94,14 @@ If this works, authentication is set up correctly.
 ### Docker Run
 
 ```bash
-docker run -v ./data:/data \
-  -v ~/.claude:/home/bridge/.claude:ro \
-  mautrix-claude
+# Copy Claude Code credentials to data directory
+cp -r ~/.claude/* ./data/.claude/
+
+# Run the bridge
+docker run -v ./data:/data mautrix-claude
 ```
 
-The `~/.claude` mount provides the Claude Code authentication credentials.
+The credentials are read from `/data/.claude/` inside the container (via `CLAUDE_CONFIG_DIR` env var).
 
 ### Docker Compose
 
@@ -109,9 +111,10 @@ services:
     image: mautrix-claude
     volumes:
       - ./data:/data
-      - ~/.claude:/home/bridge/.claude:ro
     restart: unless-stopped
 ```
+
+Copy credentials before starting: `cp -r ~/.claude/* ./data/.claude/`
 
 ### Configuration
 

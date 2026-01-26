@@ -3,8 +3,9 @@
 # Supports both API mode and sidecar mode (Pro/Max subscription).
 # Mode is controlled by config.yaml: claude.sidecar.enabled
 #
-# For sidecar mode, mount Claude Code credentials:
-#   docker run -v ./data:/data -v ~/.claude:/home/bridge/.claude:ro mautrix-claude
+# For sidecar mode, copy Claude Code credentials to ./data/.claude/:
+#   cp -r ~/.claude/* ./data/.claude/
+#   docker run -v ./data:/data mautrix-claude
 
 # ============== Stage 1: Build Go binary ==============
 # Use Debian-based image to match runtime libc (glibc)
@@ -39,7 +40,8 @@ FROM node:20-slim AS node
 FROM debian:bookworm-slim
 
 ENV UID=1337 \
-    GID=1337
+    GID=1337 \
+    CLAUDE_CONFIG_DIR=/data/.claude
 
 # Install system dependencies (Python for sidecar, minimal runtime)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -65,8 +67,8 @@ RUN curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_a
 
 # Create bridge user
 RUN useradd -m -u 1337 bridge && \
-    mkdir -p /data /app/sidecar /home/bridge/.claude && \
-    chown -R bridge:bridge /data /app /home/bridge
+    mkdir -p /data /data/.claude /app/sidecar && \
+    chown -R bridge:bridge /data /app
 
 WORKDIR /app
 
