@@ -604,7 +604,7 @@ async def test_auth(request: TestAuthRequest):
     # Validate credentials JSON format
     try:
         creds = json.loads(request.credentials_json)
-        if "claudeAiOauth" not in creds and "access_token" not in creds:
+        if "claudeAiOauth" not in creds and "access_token" not in creds and "oauthToken" not in creds:
             return TestAuthResponse(
                 success=False,
                 message="Invalid credentials format: missing authentication data"
@@ -612,18 +612,25 @@ async def test_auth(request: TestAuthRequest):
     except json.JSONDecodeError as e:
         return TestAuthResponse(success=False, message=f"Invalid JSON: {e}")
 
-    # SECURITY: Use global lock when manipulating CLAUDE_CONFIG_DIR
+    # SECURITY: Use global lock when manipulating environment variables
     async with _env_lock:
         config_dir = None
         original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        original_oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
 
         try:
-            # Set up user credentials
-            config_dir = await credentials_manager.setup_credentials(
-                request.user_id, request.credentials_json
-            )
-            os.environ["CLAUDE_CONFIG_DIR"] = config_dir
-            logger.info(f"Testing credentials for user {request.user_id[:20]}...")
+            # Check if this is an OAuth token (from setup-token)
+            if "oauthToken" in creds:
+                # Use CLAUDE_CODE_OAUTH_TOKEN env var for setup-token tokens
+                os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = creds["oauthToken"]
+                logger.info(f"Testing OAuth token for user {request.user_id[:20]}...")
+            else:
+                # Set up user credentials file for other formats
+                config_dir = await credentials_manager.setup_credentials(
+                    request.user_id, request.credentials_json
+                )
+                os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+                logger.info(f"Testing credentials for user {request.user_id[:20]}...")
 
             # Make a minimal test query
             options = ClaudeAgentOptions(
@@ -654,11 +661,16 @@ async def test_auth(request: TestAuthRequest):
                 return TestAuthResponse(success=False, message="Invalid or expired credentials")
             return TestAuthResponse(success=False, message=f"Authentication failed: {error_msg}")
         finally:
-            # Restore original CLAUDE_CONFIG_DIR
+            # Restore original environment variables
             if original_config_dir is not None:
                 os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
             elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
                 del os.environ["CLAUDE_CONFIG_DIR"]
+            # Restore CLAUDE_CODE_OAUTH_TOKEN
+            if original_oauth_token is not None:
+                os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = original_oauth_token
+            elif "CLAUDE_CODE_OAUTH_TOKEN" in os.environ and "oauthToken" in creds:
+                del os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
 
 @app.post("/v1/chat", response_model=ChatResponse)
@@ -677,21 +689,30 @@ async def chat(request: ChatRequest):
     # Get or create session for this portal (outside lock - session manager has own lock)
     session = await session_manager.get_or_create(request.portal_id)
 
-    # SECURITY: Use global lock when manipulating CLAUDE_CONFIG_DIR to prevent
+    # SECURITY: Use global lock when manipulating environment variables to prevent
     # race conditions that could cause credential leakage between users.
     # This serializes requests with per-user credentials (performance trade-off for security).
     async with _env_lock:
         config_dir = None
         original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        original_oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        using_oauth_token = False
 
         try:
             if request.user_id and request.credentials_json:
                 try:
-                    config_dir = await credentials_manager.setup_credentials(
-                        request.user_id, request.credentials_json
-                    )
-                    os.environ["CLAUDE_CONFIG_DIR"] = config_dir
-                    logger.debug(f"Using per-user credentials from {config_dir}")
+                    creds = json.loads(request.credentials_json)
+                    if "oauthToken" in creds:
+                        # Use CLAUDE_CODE_OAUTH_TOKEN env var for setup-token tokens
+                        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = creds["oauthToken"]
+                        using_oauth_token = True
+                        logger.debug(f"Using OAuth token for user {request.user_id[:20]}...")
+                    else:
+                        config_dir = await credentials_manager.setup_credentials(
+                            request.user_id, request.credentials_json
+                        )
+                        os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+                        logger.debug(f"Using per-user credentials from {config_dir}")
                 except ValueError as e:
                     raise HTTPException(status_code=400, detail=str(e))
 
@@ -761,11 +782,16 @@ async def chat(request: ChatRequest):
             REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
             raise HTTPException(status_code=500, detail="Internal error processing request")
         finally:
-            # Restore original CLAUDE_CONFIG_DIR
+            # Restore original environment variables
             if original_config_dir is not None:
                 os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
             elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
                 del os.environ["CLAUDE_CONFIG_DIR"]
+            # Restore CLAUDE_CODE_OAUTH_TOKEN
+            if original_oauth_token is not None:
+                os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = original_oauth_token
+            elif using_oauth_token and "CLAUDE_CODE_OAUTH_TOKEN" in os.environ:
+                del os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
 
 @app.post("/v1/chat/stream")
@@ -783,19 +809,27 @@ async def chat_stream(request: ChatRequest):
     session = await session_manager.get_or_create(request.portal_id)
 
     async def generate() -> AsyncIterator[str]:
-        # SECURITY: Use global lock when manipulating CLAUDE_CONFIG_DIR
+        # SECURITY: Use global lock when manipulating environment variables
         async with _env_lock:
             config_dir = None
             original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+            original_oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+            using_oauth_token = False
 
             try:
                 if request.user_id and request.credentials_json:
                     try:
-                        config_dir = await credentials_manager.setup_credentials(
-                            request.user_id, request.credentials_json
-                        )
-                        os.environ["CLAUDE_CONFIG_DIR"] = config_dir
-                        logger.debug(f"Using per-user credentials from {config_dir}")
+                        creds = json.loads(request.credentials_json)
+                        if "oauthToken" in creds:
+                            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = creds["oauthToken"]
+                            using_oauth_token = True
+                            logger.debug(f"Using OAuth token for user {request.user_id[:20]}...")
+                        else:
+                            config_dir = await credentials_manager.setup_credentials(
+                                request.user_id, request.credentials_json
+                            )
+                            os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+                            logger.debug(f"Using per-user credentials from {config_dir}")
                     except ValueError as e:
                         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
                         return
@@ -844,11 +878,16 @@ async def chat_stream(request: ChatRequest):
                 logger.error(f"Error in stream for portal {request.portal_id}: {e}", exc_info=True)
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error processing request'})}\n\n"
             finally:
-                # Restore original CLAUDE_CONFIG_DIR
+                # Restore original environment variables
                 if original_config_dir is not None:
                     os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
                 elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
                     del os.environ["CLAUDE_CONFIG_DIR"]
+                # Restore CLAUDE_CODE_OAUTH_TOKEN
+                if original_oauth_token is not None:
+                    os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = original_oauth_token
+                elif using_oauth_token and "CLAUDE_CODE_OAUTH_TOKEN" in os.environ:
+                    del os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
     return StreamingResponse(
         generate(),
@@ -1205,10 +1244,10 @@ async def oauth_complete(request: OAuthCompleteRequest):
                 oauth_token = match.group(1)
                 # Validate it's a real token (sk-ant-oat01- tokens are ~91 chars)
                 if oauth_token and oauth_token.startswith('sk-ant-') and len(oauth_token) > 80:
+                    # Store token in format that indicates it's an OAuth token for env var
+                    # The setup-token output is meant for CLAUDE_CODE_OAUTH_TOKEN env var
                     credentials_json = json.dumps({
-                        "claudeAiOauth": {
-                            "token": oauth_token
-                        }
+                        "oauthToken": oauth_token  # Raw token for CLAUDE_CODE_OAUTH_TOKEN env var
                     })
                     creds_source = "stdout_token"
                     logger.info(f"Extracted OAuth token from CLI output (length={len(oauth_token)})")
