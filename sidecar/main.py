@@ -462,12 +462,12 @@ async def test_auth(request: TestAuthRequest):
                 max_turns=1,
             )
 
-            # Simple test prompt
+            # Simple test prompt - consume all messages to avoid cleanup errors
             got_response = False
             async for message in query(prompt="Say 'OK'", options=options):
                 if hasattr(message, 'result'):
                     got_response = True
-                    break
+                    # Don't break - let the generator complete naturally
 
             if got_response:
                 logger.info(f"Credentials validated successfully for user {request.user_id[:20]}...")
