@@ -390,6 +390,38 @@ class OAuthCompleteResponse(BaseModel):
     message: str
 
 
+def _find_claude_cli() -> str:
+    """
+    Find the Claude CLI executable path.
+
+    Checks in order:
+    1. Bundled CLI from claude-agent-sdk package
+    2. 'claude' in PATH
+
+    Returns the path to the CLI executable.
+    Raises RuntimeError if not found.
+    """
+    # Try bundled CLI from agent SDK
+    try:
+        import claude_agent_sdk
+        sdk_dir = Path(claude_agent_sdk.__file__).parent
+        bundled = sdk_dir / "_bundled" / "claude"
+        if bundled.exists():
+            logger.debug(f"Using bundled Claude CLI: {bundled}")
+            return str(bundled)
+    except Exception as e:
+        logger.debug(f"Could not find bundled CLI: {e}")
+
+    # Try system PATH
+    import shutil as shutil_mod
+    claude_path = shutil_mod.which("claude")
+    if claude_path:
+        logger.debug(f"Using system Claude CLI: {claude_path}")
+        return claude_path
+
+    raise RuntimeError("Claude CLI not found. Install claude-agent-sdk or add claude to PATH.")
+
+
 def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
     """
     Run claude setup-token in a PTY and capture the OAuth URL.
@@ -406,9 +438,12 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
     env.pop('DISPLAY', None)
     env['CLAUDE_CONFIG_DIR'] = config_dir
 
+    # Find Claude CLI path
+    claude_cli = _find_claude_cli()
+
     # Run claude setup-token
     proc = subprocess.Popen(
-        ['claude', 'setup-token'],
+        [claude_cli, 'setup-token'],
         stdin=slave,
         stdout=slave,
         stderr=slave,
