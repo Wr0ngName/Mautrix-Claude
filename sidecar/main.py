@@ -934,7 +934,8 @@ async def oauth_start(request: OAuthStartRequest):
                 "created_at": now,
             }
 
-        logger.info(f"Started OAuth flow for user {request.user_id[:20]}...")
+        logger.info(f"Started OAuth flow for user {request.user_id[:20]}... URL length: {len(auth_url)}")
+        logger.debug(f"OAuth URL: {auth_url}")
         return OAuthStartResponse(auth_url=auth_url, state=state)
 
     except Exception as e:
