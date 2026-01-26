@@ -914,8 +914,11 @@ async def oauth_complete(request: OAuthCompleteRequest):
                 message="Invalid or expired OAuth state. Please start the login flow again."
             )
 
-        # Validate user matches
+        # Validate user matches - if mismatch, this could be a hijack attempt
+        # Clean up and reject to prevent resource leak
         if flow_data["user_id"] != request.user_id:
+            _cleanup_oauth_flow(flow_data)
+            del _oauth_pending[request.state]
             return OAuthCompleteResponse(
                 success=False,
                 message="User mismatch. Please start the login flow again."
