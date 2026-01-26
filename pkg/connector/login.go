@@ -180,10 +180,10 @@ func (s *SidecarLogin) SubmitUserInput(ctx context.Context, input map[string]str
 	// For now, sidecar uses global credentials from /data/.claude/
 	// This is a limitation - all users share the same subscription
 
-	// Verify sidecar is healthy
+	// Verify sidecar is healthy and authenticated
 	client := s.Connector.getSidecarClient()
 	if err := client.Validate(ctx); err != nil {
-		return nil, fmt.Errorf("sidecar not available - please contact bridge admin: %w", err)
+		return nil, fmt.Errorf("cannot use Pro/Max mode: %w", err)
 	}
 
 	// Generate a unique login ID for this user

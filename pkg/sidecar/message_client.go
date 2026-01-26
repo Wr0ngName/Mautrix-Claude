@@ -201,16 +201,20 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 	}, nil
 }
 
-// Validate checks if the sidecar is healthy.
+// Validate checks if the sidecar is healthy and authenticated.
 func (m *MessageClient) Validate(ctx context.Context) error {
 	health, err := m.client.Health(ctx)
 	if err != nil {
-		return fmt.Errorf("sidecar health check failed: %w", err)
+		// HTTP error (503 when not authenticated, connection errors, etc.)
+		return fmt.Errorf("sidecar unavailable (Claude Code may not be authenticated): %w", err)
+	}
+	if !health.Authenticated {
+		return fmt.Errorf("sidecar running but Claude Code not authenticated - bridge admin must configure valid credentials")
 	}
 	if health.Status != "healthy" {
 		return fmt.Errorf("sidecar unhealthy: %s", health.Status)
 	}
-	m.log.Info().Int("sessions", health.Sessions).Msg("Sidecar is healthy")
+	m.log.Info().Int("sessions", health.Sessions).Bool("authenticated", health.Authenticated).Msg("Sidecar is healthy")
 	return nil
 }
 
