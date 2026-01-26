@@ -373,12 +373,26 @@ async def validate_claude_auth() -> bool:
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    status = "healthy" if _auth_validated else "unhealthy"
+    """
+    Health check endpoint.
+
+    Returns 200 OK when sidecar is healthy and authenticated.
+    Returns 503 Service Unavailable when not authenticated.
+    """
+    if not _auth_validated:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unhealthy",
+                "sessions": len(session_manager.sessions),
+                "authenticated": False,
+                "error": "Claude Code not authenticated. Run 'claude' to authenticate."
+            }
+        )
     return {
-        "status": status,
+        "status": "healthy",
         "sessions": len(session_manager.sessions),
-        "authenticated": _auth_validated
+        "authenticated": True
     }
 
 

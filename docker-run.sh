@@ -68,7 +68,14 @@ fixperms
 SIDECAR_ENABLED=$(yq e '.network.sidecar.enabled // false' /data/config.yaml)
 if [[ "$SIDECAR_ENABLED" == "true" ]]; then
 	echo "Sidecar mode enabled (Pro/Max subscription via Agent SDK)"
-	start_sidecar || echo "Continuing without sidecar..."
+	if ! start_sidecar; then
+		echo "ERROR: Sidecar mode is enabled but sidecar failed to start!"
+		echo "Ensure Claude Code credentials are valid:"
+		echo "  1. Copy ~/.claude/* to ./data/.claude/ on the host"
+		echo "  2. Restart the container"
+		echo "Or disable sidecar mode in config.yaml: network.sidecar.enabled: false"
+		exit 1
+	fi
 else
 	echo "API mode (direct Anthropic API)"
 fi

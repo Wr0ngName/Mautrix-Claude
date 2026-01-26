@@ -77,8 +77,9 @@ type SessionStats struct {
 
 // HealthResponse is the response from the health endpoint.
 type HealthResponse struct {
-	Status   string `json:"status"`
-	Sessions int    `json:"sessions"`
+	Status        string `json:"status"`
+	Sessions      int    `json:"sessions"`
+	Authenticated bool   `json:"authenticated"`
 }
 
 // NewClient creates a new sidecar client with the specified timeout.

@@ -63,14 +63,18 @@ func (c *ClaudeConnector) Start(ctx context.Context) error {
 		client := sidecar.NewClient(SidecarURL, time.Duration(SidecarTimeout)*time.Second, c.Log)
 		health, err := client.Health(ctx)
 		if err != nil {
-			c.Log.Error().Err(err).Msg("Sidecar health check failed - sidecar may not be running")
-			// Don't fail startup, let LoadUserLogin handle it
-		} else {
-			c.Log.Info().
-				Str("status", health.Status).
-				Int("sessions", health.Sessions).
-				Msg("Sidecar is healthy")
+			c.Log.Error().Err(err).Msg("Sidecar health check failed")
+			return fmt.Errorf("sidecar mode enabled but sidecar is not healthy: %w (ensure Claude Code is authenticated)", err)
 		}
+		if !health.Authenticated {
+			c.Log.Error().Msg("Sidecar is running but Claude Code is not authenticated")
+			return fmt.Errorf("sidecar mode enabled but Claude Code is not authenticated - run 'claude' in the container to authenticate")
+		}
+		c.Log.Info().
+			Str("status", health.Status).
+			Int("sessions", health.Sessions).
+			Bool("authenticated", health.Authenticated).
+			Msg("Sidecar is healthy and authenticated")
 	}
 
 	// Register custom commands
