@@ -104,9 +104,14 @@ sidecar:
 // Validate validates the configuration.
 // Note: Model validation is done at runtime via API, not at config load time.
 func (c *Config) Validate() error {
-	// Basic model format check (must look like a Claude model)
-	if c.DefaultModel != "" && !strings.Contains(strings.ToLower(c.DefaultModel), "claude") {
-		return fmt.Errorf("invalid model format: %s (must be a Claude model ID)", c.DefaultModel)
+	// Allow family names (sonnet, opus, haiku) or full Claude model IDs
+	if c.DefaultModel != "" {
+		model := strings.ToLower(c.DefaultModel)
+		isFamily := model == "sonnet" || model == "opus" || model == "haiku"
+		isClaudeModel := strings.Contains(model, "claude")
+		if !isFamily && !isClaudeModel {
+			return fmt.Errorf("invalid model format: %s (must be a family name like 'sonnet' or a Claude model ID)", c.DefaultModel)
+		}
 	}
 
 	// Validate temperature if set
