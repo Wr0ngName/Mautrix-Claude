@@ -489,18 +489,23 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
 
     # Parse the URL from output
     decoded = output.decode('utf-8', errors='ignore')
-    # Remove ANSI escape codes
-    clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
-    clean = re.sub(r'\x1b\[\?[0-9]+[a-zA-Z]', '', clean)
+    # Remove ALL ANSI escape codes (CSI, OSC, private sequences)
+    clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', decoded)  # CSI sequences including ?
+    clean = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean)  # OSC sequences
+    clean = re.sub(r'\x1b[PX^_][^\x1b]*\x1b\\', '', clean)  # DCS, SOS, PM, APC
+    clean = re.sub(r'\x1b.', '', clean)  # Any remaining single-char escapes
 
     # Find the OAuth URL
     url_match = re.search(r'(https://claude\.ai/oauth/authorize\S+)', clean)
     if not url_match:
         os.close(master)
         proc.terminate()
+        logger.error(f"Failed to find OAuth URL in output. Clean length: {len(clean)}")
+        logger.debug(f"Clean output (last 500 chars): {clean[-500:]}")
         raise RuntimeError("Failed to get OAuth URL from claude setup-token")
 
     auth_url = url_match.group(1)
+    logger.info(f"Extracted OAuth URL: length={len(auth_url)}, ends_with=...{auth_url[-30:]}")
     return auth_url, master, proc
 
 
