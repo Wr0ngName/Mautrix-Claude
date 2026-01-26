@@ -13,6 +13,12 @@ services:
     environment:
       - UID=1000
       - GID=1000
+      # Increase Node.js memory limit for Claude Agent SDK
+      - NODE_OPTIONS=--max-old-space-size=1024
+    # Claude Agent SDK spawns Node.js processes - needs adequate memory
+    # Note: mem_limit requires docker-compose v2 or --compatibility flag
+    mem_limit: 2g
+    mem_reservation: 512m
     # If you're using a postgres database, uncomment the following:
     # depends_on:
     #   - postgres
