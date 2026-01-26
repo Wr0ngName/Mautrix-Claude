@@ -609,9 +609,9 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 		return
 	}
 
-	// Get the ghost for this model
+	// Get the ghost for this model (with proper metadata)
 	ghostID := c.MakeClaudeGhostID(model)
-	ghost, err := c.br.GetGhostByID(ctx, ghostID)
+	ghost, err := c.GetOrUpdateGhost(ctx, ghostID, model)
 	if err != nil {
 		ce.Reply("Failed to get Claude ghost: %v", err)
 		return
