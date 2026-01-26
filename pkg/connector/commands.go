@@ -8,6 +8,7 @@ import (
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/event"
 )
 
 // RegisterCommands registers custom commands for the Claude AI bridge.
@@ -209,13 +210,49 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 		}
 	}
 
-	// Update portal metadata - save old value for rollback on failure
+	// Check if model family changed (need to swap ghosts)
 	oldModel := meta.Model
+	if oldModel == "" {
+		oldModel = c.Config.GetDefaultModel()
+	}
+	oldFamily := claudeapi.GetModelFamily(oldModel)
+	newFamily := claudeapi.GetModelFamily(newModel)
+
+	// Update portal metadata
 	meta.Model = newModel
 	if err := ce.Portal.Save(ce.Ctx); err != nil {
 		meta.Model = oldModel // Rollback in-memory state on save failure
 		ce.Reply("Failed to save model change: %v", err)
 		return
+	}
+
+	// Swap ghosts if family changed
+	if oldFamily != newFamily && ce.Portal.MXID != "" {
+		oldGhostID := c.MakeClaudeGhostID(oldModel)
+		newGhostID := c.MakeClaudeGhostID(newModel)
+
+		// Get the new ghost and ensure it joins the room
+		newGhost, err := c.GetOrUpdateGhost(ctx, newGhostID, newModel)
+		if err != nil {
+			c.Log.Warn().Err(err).Msg("Failed to get new ghost for model switch")
+		} else {
+			// Have the new ghost join
+			if err := newGhost.Intent.EnsureJoined(ctx, ce.Portal.MXID); err != nil {
+				c.Log.Warn().Err(err).Msg("Failed to join new ghost to room")
+			}
+		}
+
+		// Have the old ghost leave by sending membership state event
+		oldGhost, err := c.br.GetExistingGhostByID(ctx, oldGhostID)
+		if err == nil && oldGhost != nil {
+			leaveContent := &event.Content{Parsed: &event.MemberEventContent{Membership: event.MembershipLeave}}
+			_, _ = oldGhost.Intent.SendState(ctx, ce.Portal.MXID, event.StateMember, oldGhost.Intent.GetMXID().String(), leaveContent, time.Now())
+		}
+
+		c.Log.Info().
+			Str("old_ghost", string(oldGhostID)).
+			Str("new_ghost", string(newGhostID)).
+			Msg("Swapped ghosts for model change")
 	}
 
 	displayName := claudeapi.GetModelDisplayName(newModel)
