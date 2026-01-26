@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, Optional
 
@@ -81,11 +82,42 @@ REQUEST_DURATION = Histogram('claude_sidecar_request_duration_seconds', 'Request
 ACTIVE_SESSIONS = Gauge('claude_sidecar_active_sessions', 'Number of active sessions')
 TOKENS_USED = Counter('claude_sidecar_tokens_total', 'Total tokens used', ['type'])
 
+# Track auth status globally
+_auth_validated = False
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    global _auth_validated
+
+    # Startup
+    await session_manager.start()
+    logger.info(f"Claude sidecar starting on port {PORT}")
+    logger.info(f"Allowed tools: {ALLOWED_TOOLS or 'none (chat only)'}")
+    logger.info(f"Model: {MODEL}")
+
+    # Validate Claude Code authentication
+    _auth_validated = await validate_claude_auth()
+    if not _auth_validated:
+        logger.error("WARNING: Claude Code is not authenticated!")
+        logger.error("Run 'claude' to authenticate before using sidecar mode")
+    else:
+        logger.info("Claude sidecar ready")
+
+    yield
+
+    # Shutdown
+    await session_manager.stop()
+    logger.info("Claude sidecar stopped")
+
+
 # FastAPI app
 app = FastAPI(
     title="Claude Agent SDK Sidecar",
     description="HTTP API for mautrix-claude bridge",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 
@@ -255,36 +287,6 @@ async def validate_claude_auth() -> bool:
     except Exception as e:
         logger.error(f"Claude Code authentication failed: {e}")
         return False
-
-
-# Track auth status globally
-_auth_validated = False
-
-
-@app.on_event("startup")
-async def startup():
-    """Start session manager on app startup."""
-    global _auth_validated
-
-    await session_manager.start()
-    logger.info(f"Claude sidecar starting on port {PORT}")
-    logger.info(f"Allowed tools: {ALLOWED_TOOLS or 'none (chat only)'}")
-    logger.info(f"Model: {MODEL}")
-
-    # Validate Claude Code authentication
-    _auth_validated = await validate_claude_auth()
-    if not _auth_validated:
-        logger.error("WARNING: Claude Code is not authenticated!")
-        logger.error("Run 'claude' to authenticate before using sidecar mode")
-    else:
-        logger.info("Claude sidecar ready")
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Stop session manager on app shutdown."""
-    await session_manager.stop()
-    logger.info("Claude sidecar stopped")
 
 
 @app.get("/health")
