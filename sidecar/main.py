@@ -1042,18 +1042,38 @@ async def oauth_complete(request: OAuthCompleteRequest):
             logger.debug(f"Drain exception: {e}")
         logger.info(f"Drained {drained_total} bytes of pending output before sending code")
 
-        # Ensure terminal is in the right mode for input
-        # Get current terminal attributes and ensure proper configuration
+        # Wait a moment for any remaining terminal output to settle
+        time.sleep(0.5)
+
+        # Drain again after the pause to catch any late output
+        extra_drained = 0
         try:
-            import tty
+            for _ in range(10):
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+                if not ready:
+                    break
+                data = os.read(master_fd, 16384)
+                if not data:
+                    break
+                extra_drained += len(data)
+        except:
+            pass
+        if extra_drained > 0:
+            logger.info(f"Drained {extra_drained} more bytes after pause")
+
+        # Send ESC key to cancel any pending Ink UI state/menu
+        os.write(master_fd, b"\x1b")  # ESC
+        time.sleep(0.1)
+
+        # Log terminal state
+        try:
             attrs = termios.tcgetattr(master_fd)
-            logger.debug(f"Terminal attrs before write: iflag={attrs[0]:#x}, oflag={attrs[1]:#x}, cflag={attrs[2]:#x}, lflag={attrs[3]:#x}")
+            logger.debug(f"Terminal attrs: iflag={attrs[0]:#x}, oflag={attrs[1]:#x}, cflag={attrs[2]:#x}, lflag={attrs[3]:#x}")
         except Exception as e:
             logger.debug(f"Could not get terminal attrs: {e}")
 
         # Write the code to the PTY character by character
         # Ink/Node.js terminal UIs often need to see individual keystrokes
-        # to properly handle input (they use raw mode and process char by char)
         logger.info(f"Typing code to PTY character by character (length={len(request.code)})")
         for i, char in enumerate(request.code):
             os.write(master_fd, char.encode())
