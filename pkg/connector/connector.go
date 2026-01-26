@@ -138,7 +138,18 @@ func (c *ClaudeConnector) GetBridgeInfoVersion() (info, capabilities int) {
 // GetConfig returns the connector configuration.
 func (c *ClaudeConnector) GetConfig() (example string, data any, upgrader configupgrade.Upgrader) {
 	fmt.Printf("[CONFIG DEBUG] GetConfig called, returning pointer %p\n", &c.Config)
-	return ExampleConfig, &c.Config, nil
+	return ExampleConfig, &c.Config, configupgrade.SimpleUpgrader(upgradeConfig)
+}
+
+// upgradeConfig copies config values from the user's config file.
+func upgradeConfig(helper configupgrade.Helper) {
+	helper.Copy(configupgrade.Str, "default_model")
+	helper.Copy(configupgrade.Int, "max_tokens")
+	helper.Copy(configupgrade.Float, "temperature")
+	helper.Copy(configupgrade.Str, "system_prompt")
+	helper.Copy(configupgrade.Int, "conversation_max_age_hours")
+	helper.Copy(configupgrade.Int, "rate_limit_per_minute")
+	helper.Copy(configupgrade.Bool, "sidecar", "enabled")
 }
 
 // ValidateConfig validates the loaded configuration.
