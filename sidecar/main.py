@@ -1174,14 +1174,41 @@ async def oauth_complete(request: OAuthCompleteRequest):
         except Exception as e:
             logger.debug(f"Could not list config dir: {e}")
 
-        # Check for credentials - try custom config dir first, then default location
+        # Check for credentials - multiple sources:
+        # 1. Token in output (claude setup-token outputs: export CLAUDE_CODE_OAUTH_TOKEN=<token>)
+        # 2. Credentials file in custom config dir
+        # 3. Credentials file in default location
         credentials_json = None
         creds_source = None
 
-        if creds_file.exists():
+        # First, try to extract token from output (setup-token outputs the token to use)
+        decoded_output = output.decode('utf-8', errors='ignore')
+        # Remove ANSI escape codes
+        clean_output = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', decoded_output)
+        clean_output = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean_output)
+        clean_output = re.sub(r'\x1b.', '', clean_output)
+
+        # Look for the OAuth token in the output
+        # Format: export CLAUDE_CODE_OAUTH_TOKEN=<token>
+        # or just: CLAUDE_CODE_OAUTH_TOKEN=<token>
+        token_match = re.search(r'CLAUDE_CODE_OAUTH_TOKEN[=\s]+([A-Za-z0-9_\-\.]+)', clean_output)
+        if token_match:
+            oauth_token = token_match.group(1)
+            if oauth_token and oauth_token != '<token>' and len(oauth_token) > 10:
+                # Create credentials JSON with the OAuth token
+                credentials_json = json.dumps({
+                    "claudeAiOauth": {
+                        "token": oauth_token
+                    }
+                })
+                creds_source = "token_output"
+                logger.info(f"Extracted OAuth token from CLI output (length={len(oauth_token)})")
+
+        # If no token in output, try credentials file
+        if not credentials_json and creds_file.exists():
             credentials_json = creds_file.read_text()
             creds_source = "custom"
-        elif default_creds.exists():
+        elif not credentials_json and default_creds.exists():
             # Check if default location was modified recently
             try:
                 mtime = default_creds.stat().st_mtime
