@@ -1006,12 +1006,52 @@ async def oauth_complete(request: OAuthCompleteRequest):
 
     # Send code to claude setup-token
     try:
-        # Write the code to the PTY
-        os.write(master_fd, (request.code + "\n").encode())
+        # Check if process is still running
+        poll_result = proc.poll()
+        if poll_result is not None:
+            logger.error(f"OAuth process already exited with code {poll_result} before receiving code")
+            # Try to read any remaining output
+            try:
+                remaining = os.read(master_fd, 16384)
+                logger.error(f"Remaining output before exit: {remaining.decode('utf-8', errors='ignore')[-500:]}")
+            except:
+                pass
+            shutil.rmtree(config_dir, ignore_errors=True)
+            return OAuthCompleteResponse(
+                success=False,
+                message="Login session expired. The authentication process ended before receiving your code. Please start login again."
+            )
+
+        logger.info(f"OAuth process still running (pid={proc.pid}), sending code...")
+
+        # Drain any pending output before sending code (in case there's buffered data)
+        try:
+            while True:
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+                if not ready:
+                    break
+                data = os.read(master_fd, 4096)
+                if not data:
+                    break
+                logger.debug(f"Drained {len(data)} bytes of pending output before sending code")
+        except:
+            pass
+
+        # Write the code to the PTY (use \r for terminal submit, like pressing Enter)
+        # Note: In terminal/PTY, \r typically submits input, not \n
+        code_bytes = (request.code + "\r").encode()
+        bytes_written = os.write(master_fd, code_bytes)
+        logger.info(f"Wrote code to PTY: {bytes_written} bytes written (code length={len(request.code)})")
+
+        # Small delay to let the subprocess process the input
+        time.sleep(0.5)
 
         # Read output to check for success
         output = b''
         start_time = time.time()
+        success_detected = False
+        error_detected = False
+
         while time.time() - start_time < 30:  # 30 second timeout
             ready, _, _ = select.select([master_fd], [], [], 0.5)
             if ready:
@@ -1019,20 +1059,46 @@ async def oauth_complete(request: OAuthCompleteRequest):
                     data = os.read(master_fd, 4096)
                     if data:
                         output += data
-                except:
+                        logger.debug(f"OAuth read {len(data)} bytes (total: {len(output)})")
+                except OSError as e:
+                    logger.debug(f"OAuth read OSError: {e}")
                     break
 
             # Check if process completed
-            if proc.poll() is not None:
+            poll_result = proc.poll()
+            if poll_result is not None:
+                logger.info(f"OAuth process exited with code {poll_result}")
+                # Read any remaining output
+                try:
+                    while True:
+                        ready, _, _ = select.select([master_fd], [], [], 0.1)
+                        if not ready:
+                            break
+                        data = os.read(master_fd, 4096)
+                        if not data:
+                            break
+                        output += data
+                except:
+                    pass
                 break
 
             # Check for success indicators
             decoded = output.decode('utf-8', errors='ignore')
             clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
             if 'success' in clean.lower() or 'authenticated' in clean.lower():
+                logger.info("OAuth success indicator detected in output")
+                success_detected = True
+                # Wait a bit more for credentials to be written
+                time.sleep(1)
                 break
             if 'error' in clean.lower() or 'failed' in clean.lower() or 'invalid' in clean.lower():
+                logger.warning("OAuth error indicator detected in output")
+                error_detected = True
                 break
+
+        # Log final state
+        elapsed = time.time() - start_time
+        logger.info(f"OAuth output collection complete: {len(output)} bytes in {elapsed:.1f}s, success={success_detected}, error={error_detected}")
 
         # Close PTY and wait for process
         try:
@@ -1046,6 +1112,17 @@ async def oauth_complete(request: OAuthCompleteRequest):
 
         # Read credentials from the config dir
         creds_file = Path(config_dir) / ".credentials.json"
+
+        # Log what files exist in config dir for debugging
+        try:
+            config_files = list(Path(config_dir).iterdir())
+            logger.debug(f"Files in OAuth config dir: {[f.name for f in config_files]}")
+        except Exception as e:
+            logger.debug(f"Could not list config dir: {e}")
+
+        # Also check default location in case CLI ignores CLAUDE_CONFIG_DIR
+        default_creds = Path.home() / ".claude" / ".credentials.json"
+
         if creds_file.exists():
             credentials_json = creds_file.read_text()
             # Validate it's proper JSON
@@ -1061,19 +1138,57 @@ async def oauth_complete(request: OAuthCompleteRequest):
                 credentials_json=credentials_json,
                 message="Login successful! Your credentials have been saved."
             )
-        else:
-            # Clean up config directory on failure too
+        elif default_creds.exists():
+            # CLI wrote to default location instead of our config dir
+            logger.warning(f"Credentials found at default location instead of {config_dir}")
+            credentials_json = default_creds.read_text()
+            json.loads(credentials_json)
+
+            # Clean up our config dir
             shutil.rmtree(config_dir, ignore_errors=True)
 
-            # Parse error from output
-            decoded = output.decode('utf-8', errors='ignore')
-            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
-            clean = re.sub(r'\x1b\[\?[0-9]+[a-zA-Z]', '', clean)
-            logger.error(f"OAuth failed - no credentials file. Output: {clean[-500:]}")
+            logger.info(f"OAuth completed successfully (from default path) for user {request.user_id[:20]}...")
             return OAuthCompleteResponse(
-                success=False,
-                message="Authentication failed. Please check your code and try again."
+                success=True,
+                credentials_json=credentials_json,
+                message="Login successful! Your credentials have been saved."
             )
+        else:
+            # Parse output for error details
+            decoded = output.decode('utf-8', errors='ignore')
+            # Remove ANSI escape codes
+            clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', decoded)
+            clean = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean)
+            clean = re.sub(r'\x1b.', '', clean)
+
+            # Log full cleaned output for debugging
+            logger.error(f"OAuth failed - no credentials file at {creds_file} or {default_creds}")
+            logger.error(f"Config dir: {config_dir}")
+            logger.error(f"Output length: {len(output)} bytes, cleaned: {len(clean)} chars")
+            if clean:
+                logger.error(f"OAuth output (last 1000 chars): {clean[-1000:]}")
+            else:
+                logger.error("OAuth output was empty!")
+
+            # Clean up config directory
+            shutil.rmtree(config_dir, ignore_errors=True)
+
+            # Provide helpful error message
+            if error_detected:
+                return OAuthCompleteResponse(
+                    success=False,
+                    message="Authentication failed. The code may be invalid or expired. Please try again."
+                )
+            elif not output:
+                return OAuthCompleteResponse(
+                    success=False,
+                    message="Authentication process did not respond. Please try starting login again."
+                )
+            else:
+                return OAuthCompleteResponse(
+                    success=False,
+                    message="Authentication failed. Please check your code and try again."
+                )
 
     except Exception as e:
         logger.error(f"OAuth completion error: {e}")
