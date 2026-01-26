@@ -192,8 +192,9 @@ func (s *SidecarLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("credentials validation failed: %w", err)
 	}
 
-	// Generate a unique login ID for this user
-	loginID := networkid.UserLoginID(fmt.Sprintf("sidecar_%s", strings.ReplaceAll(string(s.User.MXID), ":", "_")))
+	// Generate a unique login ID based on credentials hash (allows multiple sidecar logins)
+	hash := sha256.Sum256([]byte(credentialsJSON))
+	loginID := networkid.UserLoginID(fmt.Sprintf("sidecar_%s", hex.EncodeToString(hash[:10])))
 
 	userLogin, err := s.User.NewLogin(ctx, &database.UserLogin{
 		ID:         loginID,
