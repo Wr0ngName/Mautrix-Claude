@@ -529,6 +529,7 @@ async def validate_claude_auth() -> bool:
         logger.info("Validating Claude Code authentication...")
         options = ClaudeAgentOptions(
             allowed_tools=[],  # No tools for validation
+            disallowed_tools=list(DANGEROUS_TOOLS),  # SECURITY: block dangerous tools
             permission_mode="bypassPermissions",
             model=MODEL,
             max_turns=1,  # Single turn only
@@ -635,6 +636,7 @@ async def test_auth(request: TestAuthRequest):
             # Make a minimal test query
             options = ClaudeAgentOptions(
                 allowed_tools=[],  # No tools for test
+                disallowed_tools=list(DANGEROUS_TOOLS),  # SECURITY: block dangerous tools
                 permission_mode="bypassPermissions",
                 model="haiku",  # Use cheapest/fastest model for test
                 max_turns=1,
@@ -720,8 +722,11 @@ async def chat(request: ChatRequest):
             actual_model = request.model or MODEL
 
             # Build options
+            # SECURITY: Use disallowed_tools (not allowed_tools) because allowed_tools
+            # is ignored for built-in tools per GitHub issue #361
             options = ClaudeAgentOptions(
                 allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
+                disallowed_tools=list(DANGEROUS_TOOLS),  # CRITICAL: blocks Read, Write, Bash, etc.
                 permission_mode="bypassPermissions",  # No interactive prompts
                 model=actual_model,
             )
@@ -837,8 +842,10 @@ async def chat_stream(request: ChatRequest):
                 # Determine actual model to use
                 actual_model = request.model or MODEL
 
+                # SECURITY: Use disallowed_tools per GitHub issue #361
                 options = ClaudeAgentOptions(
                     allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
+                    disallowed_tools=list(DANGEROUS_TOOLS),
                     permission_mode="bypassPermissions",
                     model=actual_model,
                 )
