@@ -1025,6 +1025,7 @@ async def oauth_complete(request: OAuthCompleteRequest):
         logger.info(f"OAuth process still running (pid={proc.pid}), sending code...")
 
         # Drain any pending output before sending code (in case there's buffered data)
+        drained_total = 0
         try:
             while True:
                 ready, _, _ = select.select([master_fd], [], [], 0.1)
@@ -1033,18 +1034,36 @@ async def oauth_complete(request: OAuthCompleteRequest):
                 data = os.read(master_fd, 4096)
                 if not data:
                     break
-                logger.debug(f"Drained {len(data)} bytes of pending output before sending code")
-        except:
-            pass
+                drained_total += len(data)
+                decoded = data.decode('utf-8', errors='replace')
+                logger.debug(f"Drained {len(data)} bytes: {decoded[:50]!r}...")
+        except Exception as e:
+            logger.debug(f"Drain exception: {e}")
+        logger.info(f"Drained {drained_total} bytes of pending output before sending code")
 
-        # Write the code to the PTY (use \r for terminal submit, like pressing Enter)
-        # Note: In terminal/PTY, \r typically submits input, not \n
-        code_bytes = (request.code + "\r").encode()
+        # Ensure terminal is in the right mode for input
+        # Get current terminal attributes and ensure proper configuration
+        try:
+            import tty
+            attrs = termios.tcgetattr(master_fd)
+            logger.debug(f"Terminal attrs before write: iflag={attrs[0]:#x}, oflag={attrs[1]:#x}, cflag={attrs[2]:#x}, lflag={attrs[3]:#x}")
+        except Exception as e:
+            logger.debug(f"Could not get terminal attrs: {e}")
+
+        # Write the code to the PTY
+        # Use \n (Unix newline) - Ink/Node.js CLIs typically expect \n
+        code_bytes = (request.code + "\n").encode()
         bytes_written = os.write(master_fd, code_bytes)
         logger.info(f"Wrote code to PTY: {bytes_written} bytes written (code length={len(request.code)})")
 
+        # Flush/sync to ensure data is sent
+        try:
+            os.fsync(master_fd)
+        except:
+            pass  # May not be supported on PTY
+
         # Small delay to let the subprocess process the input
-        time.sleep(0.5)
+        time.sleep(1.0)  # Increased delay to give CLI time to process
 
         # Read output to check for success
         output = b''
@@ -1059,7 +1078,9 @@ async def oauth_complete(request: OAuthCompleteRequest):
                     data = os.read(master_fd, 4096)
                     if data:
                         output += data
-                        logger.debug(f"OAuth read {len(data)} bytes (total: {len(output)})")
+                        # Log the raw data for debugging
+                        decoded_chunk = data.decode('utf-8', errors='replace')
+                        logger.debug(f"OAuth read {len(data)} bytes (total: {len(output)}): {decoded_chunk[:100]!r}")
                 except OSError as e:
                     logger.debug(f"OAuth read OSError: {e}")
                     break
