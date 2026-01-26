@@ -316,10 +316,20 @@ class CredentialsManager:
                 creds_data = json.loads(credentials_json)
                 creds_file.write_text(json.dumps(creds_data, indent=2))
                 logger.debug(f"Set up credentials for user {user_id[:20]}...")
-                return str(user_dir)
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid credentials JSON for user {user_id}: {e}")
                 raise ValueError(f"Invalid credentials JSON: {e}")
+
+            # Create minimal settings.json - Claude CLI requires this
+            settings_file = user_dir / "settings.json"
+            settings_data = {
+                "hasCompletedOnboarding": True,
+                "autoUpdaterStatus": "disabled",
+                "hasAcknowledgedCostThreshold": True,
+            }
+            settings_file.write_text(json.dumps(settings_data, indent=2))
+
+            return str(user_dir)
 
     async def cleanup_user(self, user_id: str) -> None:
         """Remove credentials for a user."""
