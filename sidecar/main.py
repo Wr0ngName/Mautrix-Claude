@@ -1024,19 +1024,20 @@ async def oauth_complete(request: OAuthCompleteRequest):
 
         logger.info(f"OAuth process still running (pid={proc.pid}), sending code...")
 
-        # Drain any pending output before sending code (in case there's buffered data)
+        # Drain ALL pending output before sending code
+        # Read aggressively with longer timeout to get everything
         drained_total = 0
         try:
-            while True:
+            for _ in range(50):  # Try up to 50 reads (5 seconds max)
                 ready, _, _ = select.select([master_fd], [], [], 0.1)
                 if not ready:
                     break
-                data = os.read(master_fd, 4096)
+                data = os.read(master_fd, 16384)  # Larger buffer
                 if not data:
                     break
                 drained_total += len(data)
                 decoded = data.decode('utf-8', errors='replace')
-                logger.debug(f"Drained {len(data)} bytes: {decoded[:50]!r}...")
+                logger.debug(f"Drained {len(data)} bytes: {decoded[:80]!r}...")
         except Exception as e:
             logger.debug(f"Drain exception: {e}")
         logger.info(f"Drained {drained_total} bytes of pending output before sending code")
@@ -1050,20 +1051,20 @@ async def oauth_complete(request: OAuthCompleteRequest):
         except Exception as e:
             logger.debug(f"Could not get terminal attrs: {e}")
 
-        # Write the code to the PTY
-        # Use \n (Unix newline) - Ink/Node.js CLIs typically expect \n
-        code_bytes = (request.code + "\n").encode()
-        bytes_written = os.write(master_fd, code_bytes)
-        logger.info(f"Wrote code to PTY: {bytes_written} bytes written (code length={len(request.code)})")
+        # Write the code to the PTY character by character
+        # Ink/Node.js terminal UIs often need to see individual keystrokes
+        # to properly handle input (they use raw mode and process char by char)
+        logger.info(f"Typing code to PTY character by character (length={len(request.code)})")
+        for i, char in enumerate(request.code):
+            os.write(master_fd, char.encode())
+            time.sleep(0.01)  # 10ms between characters (100 chars/sec typing speed)
 
-        # Flush/sync to ensure data is sent
-        try:
-            os.fsync(master_fd)
-        except:
-            pass  # May not be supported on PTY
+        # Send Enter (newline) to submit
+        os.write(master_fd, b"\n")
+        logger.info(f"Finished typing code, sent Enter")
 
-        # Small delay to let the subprocess process the input
-        time.sleep(1.0)  # Increased delay to give CLI time to process
+        # Give the CLI time to process the input and make API call
+        time.sleep(2.0)
 
         # Read output to check for success
         output = b''
