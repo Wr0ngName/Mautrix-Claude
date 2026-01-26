@@ -64,8 +64,9 @@ fi
 cd /data
 fixperms
 
-# Start sidecar if enabled
-if [[ "$ENABLE_SIDECAR" == "true" ]]; then
+# Check if sidecar is enabled in config
+SIDECAR_ENABLED=$(yq e '.claude.sidecar.enabled // false' /data/config.yaml)
+if [[ "$SIDECAR_ENABLED" == "true" ]]; then
 	echo "Sidecar mode enabled (Pro/Max subscription via Agent SDK)"
 	start_sidecar || echo "Continuing without sidecar..."
 else

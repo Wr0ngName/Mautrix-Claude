@@ -1,16 +1,10 @@
 # mautrix-claude: Matrix bridge for Claude AI
 #
-# Supports both:
-# - API mode (default): Direct Anthropic API with API key
-# - Sidecar mode: Agent SDK with Pro/Max subscription (set ENABLE_SIDECAR=true)
+# Supports both API mode and sidecar mode (Pro/Max subscription).
+# Mode is controlled by config.yaml: claude.sidecar.enabled
 #
-# Usage:
-#   API mode (default):
-#     docker run -v ./data:/data mautrix-claude
-#
-#   Sidecar mode (Pro/Max):
-#     docker run -v ./data:/data -v ~/.claude:/home/bridge/.claude:ro \
-#       -e ENABLE_SIDECAR=true mautrix-claude
+# For sidecar mode, mount Claude Code credentials:
+#   docker run -v ./data:/data -v ~/.claude:/home/bridge/.claude:ro mautrix-claude
 
 # ============== Stage 1: Build Go binary ==============
 FROM golang:1.24-alpine AS builder
@@ -38,11 +32,7 @@ RUN CGO_ENABLED=1 go build -tags "goolm" -o /usr/bin/mautrix-claude \
 FROM python:3.11-slim
 
 ENV UID=1337 \
-    GID=1337 \
-    ENABLE_SIDECAR=false \
-    CLAUDE_SIDECAR_PORT=8090 \
-    CLAUDE_SIDECAR_ALLOWED_TOOLS="WebSearch,WebFetch,AskUserQuestion" \
-    CLAUDE_SIDECAR_MODEL="sonnet"
+    GID=1337
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
