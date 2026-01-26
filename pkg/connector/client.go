@@ -566,14 +566,34 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	if metadata, ok := c.UserLogin.Metadata.(*UserLoginMetadata); ok && metadata.CredentialsJSON != "" {
 		ctx = sidecar.WithUserCredentials(ctx, string(c.UserLogin.UserMXID), metadata.CredentialsJSON)
 	}
+
+	// Get ghost intent for typing notification
+	ghostID := c.Connector.MakeClaudeGhostID(model)
+	ghostIntent := c.Connector.br.Matrix.GhostIntent(ghostID)
+
+	// Start typing indicator before processing
+	// Use a long timeout (5 minutes) since Claude can take a while to respond
+	if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 5*time.Minute); err != nil {
+		c.Connector.Log.Debug().Err(err).Msg("Failed to start typing indicator")
+	}
+
+	// Helper to stop typing on any exit path
+	stopTyping := func() {
+		if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0); err != nil {
+			c.Connector.Log.Debug().Err(err).Msg("Failed to stop typing indicator")
+		}
+	}
+
 	stream, err := c.MessageClient.CreateMessageStream(ctx, req)
 	if err != nil {
+		stopTyping()
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")
 		friendlyErr := c.formatUserFriendlyError(err)
 		c.sendErrorToRoom(ctx, msg.Portal, friendlyErr.Error())
 		return nil, friendlyErr
 	}
 	if stream == nil {
+		stopTyping()
 		errMsg := "received nil stream from Claude API"
 		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
 		return nil, errors.New(errMsg)
@@ -611,6 +631,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			}
 		}
 	}
+
+	// Stop typing indicator now that streaming is complete
+	stopTyping()
 
 	// Check for streaming errors
 	if streamError != nil {
@@ -830,7 +853,7 @@ func (c *ClaudeClient) GetCapabilities(ctx context.Context, portal *bridgev2.Por
 		Reaction:            event.CapLevelUnsupported,
 		Reply:               event.CapLevelPartialSupport, // Could implement as conversation context
 		ReadReceipts:        false,
-		TypingNotifications: false,
+		TypingNotifications: true, // Claude shows "typing" while processing
 	}
 }
 
