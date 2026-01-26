@@ -162,8 +162,8 @@ bridge:
         "example.com": user
         "@admin:example.com": admin
 
-# Claude connector specific options
-claude:
+# Network (Claude) connector specific options
+network:
     # Default Claude model to use
     # Use family names to automatically use the latest version:
     #   sonnet, opus, haiku
@@ -188,6 +188,12 @@ claude:
 
     # Rate limiting (requests per minute, 0 = unlimited)
     rate_limit_per_minute: 60
+
+    # Sidecar mode for Pro/Max subscription support
+    # When enabled, uses the Claude Agent SDK sidecar instead of direct API
+    # This allows using Pro/Max subscriptions instead of API credits
+    sidecar:
+        enabled: false
 
 # Logging config
 logging:

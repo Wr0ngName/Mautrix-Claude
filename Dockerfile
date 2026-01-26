@@ -1,7 +1,7 @@
 # mautrix-claude: Matrix bridge for Claude AI
 #
 # Supports both API mode and sidecar mode (Pro/Max subscription).
-# Mode is controlled by config.yaml: claude.sidecar.enabled
+# Mode is controlled by config.yaml: network.sidecar.enabled
 #
 # For sidecar mode, copy Claude Code credentials to ./data/.claude/:
 #   cp -r ~/.claude/* ./data/.claude/
