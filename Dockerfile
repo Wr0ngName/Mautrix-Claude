@@ -31,26 +31,33 @@ RUN CGO_ENABLED=1 go build -tags "goolm" -o /usr/bin/mautrix-claude \
         -X 'main.BuildTime=${BUILD_TIME:-$(date -Iseconds)}'" \
     ./cmd/mautrix-claude
 
-# ============== Stage 2: Final image ==============
-FROM python:3.11-slim
+# ============== Stage 2: Get Node.js binary ==============
+FROM node:20-slim AS node
+
+# ============== Stage 3: Final image ==============
+# Use minimal Debian base with Python
+FROM debian:bookworm-slim
 
 ENV UID=1337 \
     GID=1337
 
-# Install system dependencies
+# Install system dependencies (Python for sidecar, minimal runtime)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     bash \
-    jq \
     curl \
     gosu \
-    sqlite3 \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    libsqlite3-0 \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/python3 /usr/bin/python
 
-# Install Claude Code CLI (for Pro/Max authentication)
-RUN npm install -g @anthropic-ai/claude-code
+# Copy Node.js from node stage (needed for Claude Agent SDK CLI)
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/bin/node /usr/local/bin/nodejs
 
 # Install yq for YAML processing
 RUN curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
@@ -68,7 +75,7 @@ COPY --from=builder /usr/bin/mautrix-claude /usr/bin/mautrix-claude
 
 # Copy and install Python sidecar
 COPY sidecar/requirements.txt /app/sidecar/
-RUN pip install --no-cache-dir -r /app/sidecar/requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r /app/sidecar/requirements.txt
 
 COPY sidecar/main.py /app/sidecar/
 
