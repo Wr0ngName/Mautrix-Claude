@@ -144,6 +144,19 @@ func (c *ClaudeConnector) GetConfig() (example string, data any, upgrader config
 // upgradeConfig copies config values from the user's config file.
 func upgradeConfig(helper configupgrade.Helper) {
 	fmt.Printf("[CONFIG DEBUG] upgradeConfig called\n")
+
+	// Debug: try to read user values
+	if temp, ok := helper.Get(configupgrade.Float, "temperature"); ok {
+		fmt.Printf("[CONFIG DEBUG] User temperature: %s\n", temp)
+	} else {
+		fmt.Printf("[CONFIG DEBUG] User temperature NOT FOUND\n")
+	}
+	if sidecar, ok := helper.Get(configupgrade.Bool, "sidecar", "enabled"); ok {
+		fmt.Printf("[CONFIG DEBUG] User sidecar.enabled: %s\n", sidecar)
+	} else {
+		fmt.Printf("[CONFIG DEBUG] User sidecar.enabled NOT FOUND\n")
+	}
+
 	helper.Copy(configupgrade.Str, "default_model")
 	helper.Copy(configupgrade.Int, "max_tokens")
 	helper.Copy(configupgrade.Float, "temperature")
