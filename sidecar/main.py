@@ -107,6 +107,21 @@ async def lifespan(app: FastAPI):
     logger.info(f"Allowed tools: {ALLOWED_TOOLS or 'none (chat only)'}")
     logger.info(f"Model: {MODEL}")
 
+    # Verify CLI and Node.js are available (for OAuth and Agent SDK)
+    try:
+        claude_cli = _find_claude_cli()
+        cli_result = subprocess.run([claude_cli, '--version'], capture_output=True, text=True, timeout=10)
+        logger.info(f"Claude CLI: {claude_cli} (exit={cli_result.returncode})")
+        if cli_result.stdout.strip():
+            logger.info(f"CLI version: {cli_result.stdout.strip()}")
+        if cli_result.returncode != 0 and cli_result.stderr:
+            logger.warning(f"CLI stderr: {cli_result.stderr.strip()}")
+
+        node_result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+        logger.info(f"Node.js: {node_result.stdout.strip()}")
+    except Exception as e:
+        logger.error(f"CLI verification failed: {e}")
+
     # Validate Claude Code authentication
     _auth_validated = await validate_claude_auth()
     if not _auth_validated:
