@@ -685,6 +685,16 @@ func (c *ClaudeClient) formatUserFriendlyError(err error) error {
 		return nil
 	}
 
+	errStr := strings.ToLower(err.Error())
+
+	// Check for sidecar auth errors (credentials expired/invalid)
+	if strings.Contains(errStr, "credentials") && (strings.Contains(errStr, "expired") || strings.Contains(errStr, "re-login")) {
+		return fmt.Errorf("your Claude credentials have expired. Please use the 'logout' command, then log in again with fresh credentials")
+	}
+	if strings.Contains(errStr, "authentication failed") || strings.Contains(errStr, "401") {
+		return fmt.Errorf("authentication failed. Your credentials may have expired - please use 'logout' then log in again")
+	}
+
 	// Check for specific error types
 	if claudeapi.IsRateLimitError(err) {
 		retryAfter := claudeapi.GetRetryAfter(err)

@@ -122,6 +122,31 @@ type TestAuthResponse struct {
 	Message string `json:"message"`
 }
 
+// OAuthStartRequest is the request body to start OAuth login flow.
+type OAuthStartRequest struct {
+	UserID string `json:"user_id"`
+}
+
+// OAuthStartResponse is the response from the OAuth start endpoint.
+type OAuthStartResponse struct {
+	AuthURL string `json:"auth_url"`
+	State   string `json:"state"`
+}
+
+// OAuthCompleteRequest is the request to complete OAuth login flow.
+type OAuthCompleteRequest struct {
+	UserID string `json:"user_id"`
+	State  string `json:"state"`
+	Code   string `json:"code"`
+}
+
+// OAuthCompleteResponse is the response from OAuth completion.
+type OAuthCompleteResponse struct {
+	Success         bool    `json:"success"`
+	CredentialsJSON *string `json:"credentials_json,omitempty"`
+	Message         string  `json:"message"`
+}
+
 // NewClient creates a new sidecar client with the specified timeout.
 func NewClient(baseURL string, timeout time.Duration, log zerolog.Logger) *Client {
 	if timeout <= 0 {
@@ -263,6 +288,81 @@ func (c *Client) TestAuth(ctx context.Context, userID, credentialsJSON string) (
 	}
 
 	return &authResp, nil
+}
+
+// OAuthStart initiates the OAuth login flow and returns an authorization URL.
+// The user should visit this URL in their browser to authenticate.
+func (c *Client) OAuthStart(ctx context.Context, userID string) (*OAuthStartResponse, error) {
+	reqBody := OAuthStartRequest{
+		UserID: userID,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/auth/oauth/start", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("OAuth start failed: %s - %s", resp.Status, string(body))
+	}
+
+	var oauthResp OAuthStartResponse
+	if err := json.NewDecoder(resp.Body).Decode(&oauthResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &oauthResp, nil
+}
+
+// OAuthComplete completes the OAuth flow by exchanging the authorization code for credentials.
+func (c *Client) OAuthComplete(ctx context.Context, userID, state, code string) (*OAuthCompleteResponse, error) {
+	reqBody := OAuthCompleteRequest{
+		UserID: userID,
+		State:  state,
+		Code:   code,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/auth/oauth/complete", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("OAuth complete failed: %s - %s", resp.Status, string(body))
+	}
+
+	var oauthResp OAuthCompleteResponse
+	if err := json.NewDecoder(resp.Body).Decode(&oauthResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &oauthResp, nil
 }
 
 // Chat sends a message to Claude and returns the response.

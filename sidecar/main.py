@@ -10,7 +10,12 @@ import hashlib
 import json
 import logging
 import os
+import pty
+import re
+import secrets
+import select
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -352,6 +357,102 @@ class CredentialsManager:
 
 # Global credentials manager
 credentials_manager = CredentialsManager()
+
+
+# ============================================================================
+# OAuth Login Flow (using claude setup-token subprocess)
+# ============================================================================
+
+# Pending OAuth flows (state -> {user_id, master_fd, proc, config_dir, created_at})
+_oauth_pending: Dict[str, dict] = {}
+_oauth_lock = asyncio.Lock()
+OAUTH_PENDING_TIMEOUT = 600  # 10 minutes
+
+
+class OAuthStartRequest(BaseModel):
+    user_id: str
+
+
+class OAuthStartResponse(BaseModel):
+    auth_url: str
+    state: str
+
+
+class OAuthCompleteRequest(BaseModel):
+    user_id: str
+    state: str
+    code: str
+
+
+class OAuthCompleteResponse(BaseModel):
+    success: bool
+    credentials_json: Optional[str] = None
+    message: str
+
+
+def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
+    """
+    Run claude setup-token in a PTY and capture the OAuth URL.
+
+    Returns (auth_url, master_fd, process) tuple.
+    The master_fd and process are kept alive to later send the auth code.
+    """
+    # Create pseudo-terminal
+    master, slave = pty.openpty()
+
+    # Environment without browser
+    env = os.environ.copy()
+    env['BROWSER'] = '/bin/false'
+    env.pop('DISPLAY', None)
+    env['CLAUDE_CONFIG_DIR'] = config_dir
+
+    # Run claude setup-token
+    proc = subprocess.Popen(
+        ['claude', 'setup-token'],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        preexec_fn=os.setsid,
+        env=env
+    )
+
+    os.close(slave)
+
+    # Read output until we find the URL and "Paste code" prompt
+    output = b''
+    start_time = time.time()
+
+    while time.time() - start_time < 30:  # 30 second timeout
+        ready, _, _ = select.select([master], [], [], 0.5)
+        if ready:
+            try:
+                data = os.read(master, 4096)
+                if data:
+                    output += data
+            except:
+                break
+
+        # Check if we have the URL and prompt
+        decoded = output.decode('utf-8', errors='ignore')
+        if 'https://claude.ai/oauth/authorize' in decoded and 'Paste code' in decoded:
+            break
+
+    # Parse the URL from output
+    decoded = output.decode('utf-8', errors='ignore')
+    # Remove ANSI escape codes
+    clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
+    clean = re.sub(r'\x1b\[\?[0-9]+[a-zA-Z]', '', clean)
+
+    # Find the OAuth URL
+    url_match = re.search(r'(https://claude\.ai/oauth/authorize\S+)', clean)
+    if not url_match:
+        os.close(master)
+        proc.terminate()
+        raise RuntimeError("Failed to get OAuth URL from claude setup-token")
+
+    auth_url = url_match.group(1)
+    return auth_url, master, proc
+
 
 # Global lock for CLAUDE_CONFIG_DIR manipulation
 # SECURITY: This prevents race conditions where concurrent requests could
@@ -714,6 +815,198 @@ async def get_session(portal_id: str):
         return stats
     else:
         raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.post("/v1/auth/oauth/start", response_model=OAuthStartResponse)
+async def oauth_start(request: OAuthStartRequest):
+    """
+    Start OAuth login flow using claude setup-token subprocess.
+
+    Returns an authorization URL that the user should visit in their browser.
+    After authenticating, they'll see a code to paste back to complete login.
+    """
+    if not request.user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+
+    # Generate state for this flow
+    state = secrets.token_urlsafe(32)
+
+    # Create temp config dir for this user's OAuth flow
+    user_hash = hashlib.sha256(request.user_id.encode()).hexdigest()[:16]
+    config_dir = str(Path(tempfile.gettempdir()) / f"claude-oauth-{user_hash}")
+    Path(config_dir).mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Run claude setup-token and get the OAuth URL
+        auth_url, master_fd, proc = _run_setup_token_and_get_url(config_dir)
+
+        # Store pending OAuth flow
+        async with _oauth_lock:
+            # Clean up expired pending flows
+            now = time.time()
+            expired_states = [s for s, data in _oauth_pending.items()
+                             if now - data["created_at"] > OAUTH_PENDING_TIMEOUT]
+            for s in expired_states:
+                # Cleanup expired flow resources
+                try:
+                    os.close(data.get("master_fd", -1))
+                except:
+                    pass
+                try:
+                    data.get("proc").terminate()
+                except:
+                    pass
+                del _oauth_pending[s]
+
+            # Store this flow
+            _oauth_pending[state] = {
+                "user_id": request.user_id,
+                "master_fd": master_fd,
+                "proc": proc,
+                "config_dir": config_dir,
+                "created_at": now,
+            }
+
+        logger.info(f"Started OAuth flow for user {request.user_id[:20]}...")
+        return OAuthStartResponse(auth_url=auth_url, state=state)
+
+    except Exception as e:
+        logger.error(f"Failed to start OAuth flow: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start OAuth: {e}")
+
+
+@app.post("/v1/auth/oauth/complete", response_model=OAuthCompleteResponse)
+async def oauth_complete(request: OAuthCompleteRequest):
+    """
+    Complete OAuth login flow by sending the code to claude setup-token.
+
+    The code is displayed to the user after they complete authentication in their browser.
+    Returns credentials_json that can be used for subsequent requests.
+    """
+    if not request.user_id or not request.state or not request.code:
+        raise HTTPException(status_code=400, detail="user_id, state, and code required")
+
+    # Get and validate pending flow
+    async with _oauth_lock:
+        flow_data = _oauth_pending.get(request.state)
+        if not flow_data:
+            return OAuthCompleteResponse(
+                success=False,
+                message="Invalid or expired OAuth state. Please start the login flow again."
+            )
+
+        # Validate user matches
+        if flow_data["user_id"] != request.user_id:
+            return OAuthCompleteResponse(
+                success=False,
+                message="User mismatch. Please start the login flow again."
+            )
+
+        # Check expiration
+        if time.time() - flow_data["created_at"] > OAUTH_PENDING_TIMEOUT:
+            # Cleanup
+            try:
+                os.close(flow_data.get("master_fd", -1))
+            except:
+                pass
+            try:
+                flow_data.get("proc").terminate()
+            except:
+                pass
+            del _oauth_pending[request.state]
+            return OAuthCompleteResponse(
+                success=False,
+                message="OAuth flow expired. Please start the login flow again."
+            )
+
+        master_fd = flow_data["master_fd"]
+        proc = flow_data["proc"]
+        config_dir = flow_data["config_dir"]
+        # Remove pending flow
+        del _oauth_pending[request.state]
+
+    # Send code to claude setup-token
+    try:
+        # Write the code to the PTY
+        os.write(master_fd, (request.code + "\n").encode())
+
+        # Read output to check for success
+        output = b''
+        start_time = time.time()
+        while time.time() - start_time < 30:  # 30 second timeout
+            ready, _, _ = select.select([master_fd], [], [], 0.5)
+            if ready:
+                try:
+                    data = os.read(master_fd, 4096)
+                    if data:
+                        output += data
+                except:
+                    break
+
+            # Check if process completed
+            if proc.poll() is not None:
+                break
+
+            # Check for success indicators
+            decoded = output.decode('utf-8', errors='ignore')
+            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
+            if 'success' in clean.lower() or 'authenticated' in clean.lower():
+                break
+            if 'error' in clean.lower() or 'failed' in clean.lower() or 'invalid' in clean.lower():
+                break
+
+        # Cleanup PTY
+        try:
+            os.close(master_fd)
+        except:
+            pass
+        try:
+            proc.terminate()
+        except:
+            pass
+
+        # Check exit code
+        proc.wait(timeout=5)
+
+        # Read credentials from the config dir
+        creds_file = Path(config_dir) / ".credentials.json"
+        if creds_file.exists():
+            credentials_json = creds_file.read_text()
+            # Validate it's proper JSON
+            json.loads(credentials_json)
+
+            logger.info(f"OAuth completed successfully for user {request.user_id[:20]}...")
+            return OAuthCompleteResponse(
+                success=True,
+                credentials_json=credentials_json,
+                message="Login successful! Your credentials have been saved."
+            )
+        else:
+            # Parse error from output
+            decoded = output.decode('utf-8', errors='ignore')
+            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
+            clean = re.sub(r'\x1b\[\?[0-9]+[a-zA-Z]', '', clean)
+            logger.error(f"OAuth failed - no credentials file. Output: {clean[-500:]}")
+            return OAuthCompleteResponse(
+                success=False,
+                message="Authentication failed. Please check your code and try again."
+            )
+
+    except Exception as e:
+        logger.error(f"OAuth completion error: {e}")
+        # Cleanup
+        try:
+            os.close(master_fd)
+        except:
+            pass
+        try:
+            proc.terminate()
+        except:
+            pass
+        return OAuthCompleteResponse(
+            success=False,
+            message=f"Authentication error: {e}"
+        )
 
 
 @app.delete("/v1/users/{user_id}")

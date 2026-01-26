@@ -256,6 +256,16 @@ func (m *MessageClient) GetMetrics() *claudeapi.Metrics {
 	return m.metrics
 }
 
+// OAuthStart initiates the OAuth login flow and returns an authorization URL.
+func (m *MessageClient) OAuthStart(ctx context.Context, userID string) (*OAuthStartResponse, error) {
+	return m.client.OAuthStart(ctx, userID)
+}
+
+// OAuthComplete completes the OAuth flow by exchanging the code for credentials.
+func (m *MessageClient) OAuthComplete(ctx context.Context, userID, state, code string) (*OAuthCompleteResponse, error) {
+	return m.client.OAuthComplete(ctx, userID, state, code)
+}
+
 // GetClientType returns the client type identifier.
 func (m *MessageClient) GetClientType() string {
 	return "sidecar"

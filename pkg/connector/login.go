@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -121,10 +120,13 @@ func isValidAPIKeyFormat(apiKey string) bool {
 }
 
 // SidecarLogin handles login when sidecar mode is enabled.
-// Users provide their Claude Code credentials JSON for Pro/Max subscription access.
+// Uses OAuth 2.0 flow: user visits URL, gets code, pastes code back.
 type SidecarLogin struct {
 	User      *bridgev2.User
 	Connector *ClaudeConnector
+
+	// OAuth flow state (stored between steps)
+	oauthState string
 }
 
 var (
@@ -132,52 +134,9 @@ var (
 	_ bridgev2.LoginProcessUserInput = (*SidecarLogin)(nil)
 )
 
-// Start begins the sidecar login flow.
+// Start begins the sidecar OAuth login flow.
 func (s *SidecarLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
-	return &bridgev2.LoginStep{
-		Type:   bridgev2.LoginStepTypeUserInput,
-		StepID: "credentials",
-		Instructions: "To use your Claude Pro/Max subscription:\n\n" +
-			"1. On your computer, run: claude\n" +
-			"2. Complete the browser authentication\n" +
-			"3. Run: cat ~/.claude/.credentials.json\n" +
-			"4. Copy the JSON content and paste it below\n\n" +
-			"(Your credentials are stored securely and only used for this bridge)",
-		UserInputParams: &bridgev2.LoginUserInputParams{
-			Fields: []bridgev2.LoginInputDataField{
-				{
-					Type:        bridgev2.LoginInputFieldTypePassword,
-					ID:          "credentials_json",
-					Name:        "Credentials JSON",
-					Description: "Contents of ~/.claude/.credentials.json",
-				},
-			},
-		},
-	}, nil
-}
-
-// SubmitUserInput processes the submitted credentials.
-func (s *SidecarLogin) SubmitUserInput(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
-	credentialsJSON := input["credentials_json"]
-
-	if credentialsJSON == "" {
-		return nil, fmt.Errorf("credentials JSON is required")
-	}
-
-	// Validate it's valid JSON
-	var creds map[string]any
-	if err := json.Unmarshal([]byte(credentialsJSON), &creds); err != nil {
-		return nil, fmt.Errorf("invalid JSON format: %w", err)
-	}
-
-	// Check for required fields (access_token or similar)
-	if _, ok := creds["claudeAiOauth"]; !ok {
-		if _, ok := creds["access_token"]; !ok {
-			return nil, fmt.Errorf("invalid credentials: missing authentication data")
-		}
-	}
-
-	// Verify sidecar is running
+	// Verify sidecar is running first
 	client := s.Connector.getSidecarClient()
 	sidecarClient, ok := client.(*sidecar.MessageClient)
 	if !ok {
@@ -187,12 +146,81 @@ func (s *SidecarLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		return nil, fmt.Errorf("sidecar not available: %w", err)
 	}
 
-	// Test the user's credentials by making a real API call
+	// Start OAuth flow to get the authorization URL
+	oauthResp, err := sidecarClient.OAuthStart(ctx, string(s.User.MXID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to start OAuth flow: %w", err)
+	}
+
+	// Store state for later validation
+	s.oauthState = oauthResp.State
+
+	return &bridgev2.LoginStep{
+		Type:   bridgev2.LoginStepTypeUserInput,
+		StepID: "oauth_code",
+		Instructions: fmt.Sprintf(
+			"To connect your Claude Pro/Max subscription:\n\n"+
+				"1. Open this URL in your browser:\n   %s\n\n"+
+				"2. Log in with your Anthropic account\n"+
+				"3. Copy the code shown after login\n"+
+				"4. Paste the code below\n\n"+
+				"(The code expires in 10 minutes)",
+			oauthResp.AuthURL,
+		),
+		UserInputParams: &bridgev2.LoginUserInputParams{
+			Fields: []bridgev2.LoginInputDataField{
+				{
+					Type:        bridgev2.LoginInputFieldTypePassword,
+					ID:          "auth_code",
+					Name:        "Authorization Code",
+					Description: "Code shown after completing browser authentication",
+				},
+			},
+		},
+	}, nil
+}
+
+// SubmitUserInput processes the submitted OAuth authorization code.
+func (s *SidecarLogin) SubmitUserInput(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+	authCode := input["auth_code"]
+
+	if authCode == "" {
+		return nil, fmt.Errorf("authorization code is required")
+	}
+
+	if s.oauthState == "" {
+		return nil, fmt.Errorf("OAuth flow expired, please start login again")
+	}
+
+	// Get sidecar client
+	client := s.Connector.getSidecarClient()
+	sidecarClient, ok := client.(*sidecar.MessageClient)
+	if !ok {
+		return nil, fmt.Errorf("sidecar client not available")
+	}
+
+	// Complete OAuth flow - exchange code for credentials
+	oauthResp, err := sidecarClient.OAuthComplete(ctx, string(s.User.MXID), s.oauthState, authCode)
+	if err != nil {
+		return nil, fmt.Errorf("OAuth error: %w", err)
+	}
+
+	if !oauthResp.Success {
+		return nil, fmt.Errorf("authentication failed: %s", oauthResp.Message)
+	}
+
+	if oauthResp.CredentialsJSON == nil || *oauthResp.CredentialsJSON == "" {
+		return nil, fmt.Errorf("authentication failed: no credentials received")
+	}
+
+	credentialsJSON := *oauthResp.CredentialsJSON
+
+	// Test the credentials by making a real API call
 	if err := sidecarClient.TestAuth(ctx, string(s.User.MXID), credentialsJSON); err != nil {
 		return nil, fmt.Errorf("credentials validation failed: %w", err)
 	}
 
-	// Generate a unique login ID based on credentials hash (allows multiple sidecar logins)
+	// Generate a unique login ID based on credentials hash
 	hash := sha256.Sum256([]byte(credentialsJSON))
 	loginID := networkid.UserLoginID(fmt.Sprintf("sidecar_%s", hex.EncodeToString(hash[:10])))
 
