@@ -7,9 +7,12 @@
 #   docker run -v ./data:/data -v ~/.claude:/home/bridge/.claude:ro mautrix-claude
 
 # ============== Stage 1: Build Go binary ==============
-FROM golang:1.24-alpine AS builder
+# Use Debian-based image to match runtime libc (glibc)
+FROM golang:1.24-bookworm AS builder
 
-RUN apk add --no-cache git ca-certificates build-base sqlite-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates build-essential libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY go.mod go.sum ./
