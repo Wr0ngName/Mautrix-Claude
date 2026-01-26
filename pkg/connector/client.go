@@ -994,7 +994,7 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 
 	// Generate a unique conversation ID
 	conversationID := fmt.Sprintf("conv_%s_%d", claudeapi.GetModelFamily(model), time.Now().UnixNano())
-	portalKey := MakeClaudePortalKey(conversationID)
+	portalKey := MakeClaudePortalKey(conversationID, c.UserLogin.ID)
 
 	c.Connector.Log.Info().
 		Str("identifier", identifier).

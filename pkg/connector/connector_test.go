@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 func TestNewConnector(t *testing.T) {
@@ -257,10 +258,11 @@ func TestMakeClaudeGhostID(t *testing.T) {
 }
 
 func TestMakeClaudePortalKey(t *testing.T) {
-	t.Run("creates portal key from conversation name", func(t *testing.T) {
+	t.Run("creates portal key from conversation name with login ID", func(t *testing.T) {
 		conversationID := "conv_123"
+		loginID := networkid.UserLoginID("test_login_456")
 
-		key := MakeClaudePortalKey(conversationID)
+		key := MakeClaudePortalKey(conversationID, loginID)
 
 		if key.ID == "" {
 			t.Error("portal key ID should not be empty")
@@ -270,6 +272,11 @@ func TestMakeClaudePortalKey(t *testing.T) {
 		keyStr := string(key.ID)
 		if keyStr == "" {
 			t.Error("portal key ID string should not be empty")
+		}
+
+		// Receiver should be set to login ID for user isolation
+		if key.Receiver != loginID {
+			t.Errorf("portal key Receiver = %v, want %v", key.Receiver, loginID)
 		}
 	})
 }

@@ -341,6 +341,11 @@ class CredentialsManager:
 # Global credentials manager
 credentials_manager = CredentialsManager()
 
+# Global lock for CLAUDE_CONFIG_DIR manipulation
+# SECURITY: This prevents race conditions where concurrent requests could
+# cause User A's query to run with User B's credentials
+_env_lock = asyncio.Lock()
+
 
 async def validate_claude_auth() -> bool:
     """Validate that Claude Code is authenticated by making a test query."""
@@ -396,91 +401,94 @@ async def chat(request: ChatRequest):
     # Validate input before processing
     request.validate_input()
 
-    # Set up per-user credentials if provided
-    config_dir = None
-    original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    # Get or create session for this portal (outside lock - session manager has own lock)
+    session = await session_manager.get_or_create(request.portal_id)
 
-    try:
-        if request.user_id and request.credentials_json:
-            try:
-                config_dir = await credentials_manager.setup_credentials(
-                    request.user_id, request.credentials_json
-                )
-                os.environ["CLAUDE_CONFIG_DIR"] = config_dir
-                logger.debug(f"Using per-user credentials from {config_dir}")
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
+    # SECURITY: Use global lock when manipulating CLAUDE_CONFIG_DIR to prevent
+    # race conditions that could cause credential leakage between users.
+    # This serializes requests with per-user credentials (performance trade-off for security).
+    async with _env_lock:
+        config_dir = None
+        original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 
-        # Get or create session for this portal
-        session = await session_manager.get_or_create(request.portal_id)
+        try:
+            if request.user_id and request.credentials_json:
+                try:
+                    config_dir = await credentials_manager.setup_credentials(
+                        request.user_id, request.credentials_json
+                    )
+                    os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+                    logger.debug(f"Using per-user credentials from {config_dir}")
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
 
-        # Build options
-        options = ClaudeAgentOptions(
-            allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
-            permission_mode="bypassPermissions",  # No interactive prompts
-            model=request.model or MODEL,
-        )
+            # Build options
+            options = ClaudeAgentOptions(
+                allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
+                permission_mode="bypassPermissions",  # No interactive prompts
+                model=request.model or MODEL,
+            )
 
-        # Resume session if not first message
-        if session.message_count > 0:
-            options.resume = session.session_id
+            # Resume session if not first message
+            if session.message_count > 0:
+                options.resume = session.session_id
 
-        # Set system prompt
-        system_prompt = request.system_prompt or SYSTEM_PROMPT
-        if system_prompt:
-            options.system_prompt = system_prompt
+            # Set system prompt
+            system_prompt = request.system_prompt or SYSTEM_PROMPT
+            if system_prompt:
+                options.system_prompt = system_prompt
 
-        # Query Claude
-        response_text = ""
-        tokens_used = 0
+            # Query Claude
+            response_text = ""
+            tokens_used = 0
 
-        async for message in query(prompt=request.message, options=options):
-            # Capture session ID on init
-            if hasattr(message, 'subtype') and message.subtype == 'init':
-                if hasattr(message, 'data') and 'session_id' in message.data:
-                    session.session_id = message.data['session_id']
+            async for message in query(prompt=request.message, options=options):
+                # Capture session ID on init
+                if hasattr(message, 'subtype') and message.subtype == 'init':
+                    if hasattr(message, 'data') and 'session_id' in message.data:
+                        session.session_id = message.data['session_id']
 
-            # Capture result
-            if hasattr(message, 'result'):
-                response_text = message.result
+                # Capture result
+                if hasattr(message, 'result'):
+                    response_text = message.result
 
-            # Capture token usage if available
-            if hasattr(message, 'usage'):
-                if hasattr(message.usage, 'input_tokens'):
-                    tokens_used += message.usage.input_tokens
-                    TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
-                if hasattr(message.usage, 'output_tokens'):
-                    tokens_used += message.usage.output_tokens
-                    TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+                # Capture token usage if available
+                if hasattr(message, 'usage'):
+                    if hasattr(message.usage, 'input_tokens'):
+                        tokens_used += message.usage.input_tokens
+                        TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
+                    if hasattr(message.usage, 'output_tokens'):
+                        tokens_used += message.usage.output_tokens
+                        TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
 
-        # Update session
-        session.message_count += 1
-        session.last_used = time.time()
+            # Update session
+            session.message_count += 1
+            session.last_used = time.time()
 
-        REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='success').inc()
-        REQUEST_DURATION.observe(time.time() - start_time)
+            REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='success').inc()
+            REQUEST_DURATION.observe(time.time() - start_time)
 
-        return ChatResponse(
-            portal_id=request.portal_id,
-            session_id=session.session_id,
-            response=response_text,
-            tokens_used=tokens_used if tokens_used > 0 else None
-        )
+            return ChatResponse(
+                portal_id=request.portal_id,
+                session_id=session.session_id,
+                response=response_text,
+                tokens_used=tokens_used if tokens_used > 0 else None
+            )
 
-    except HTTPException:
-        # Re-raise HTTP exceptions (validation errors, etc.)
-        raise
-    except Exception as e:
-        # Log full error but don't expose details to client (security)
-        logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
-        REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
-        raise HTTPException(status_code=500, detail="Internal error processing request")
-    finally:
-        # Restore original CLAUDE_CONFIG_DIR
-        if original_config_dir is not None:
-            os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
-        elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
-            del os.environ["CLAUDE_CONFIG_DIR"]
+        except HTTPException:
+            # Re-raise HTTP exceptions (validation errors, etc.)
+            raise
+        except Exception as e:
+            # Log full error but don't expose details to client (security)
+            logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
+            REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
+            raise HTTPException(status_code=500, detail="Internal error processing request")
+        finally:
+            # Restore original CLAUDE_CONFIG_DIR
+            if original_config_dir is not None:
+                os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
+            elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
+                del os.environ["CLAUDE_CONFIG_DIR"]
 
 
 @app.post("/v1/chat/stream")
@@ -489,57 +497,78 @@ async def chat_stream(request: ChatRequest):
     Send a message to Claude and stream the response.
 
     Returns Server-Sent Events (SSE) stream.
+    Supports per-user credentials via user_id and credentials_json.
     """
     # Validate input before processing
     request.validate_input()
 
+    # Get or create session for this portal (outside lock - session manager has own lock)
+    session = await session_manager.get_or_create(request.portal_id)
+
     async def generate() -> AsyncIterator[str]:
-        try:
-            session = await session_manager.get_or_create(request.portal_id)
+        # SECURITY: Use global lock when manipulating CLAUDE_CONFIG_DIR
+        async with _env_lock:
+            config_dir = None
+            original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 
-            options = ClaudeAgentOptions(
-                allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
-                permission_mode="bypassPermissions",
-                model=request.model or MODEL,
-            )
+            try:
+                if request.user_id and request.credentials_json:
+                    try:
+                        config_dir = await credentials_manager.setup_credentials(
+                            request.user_id, request.credentials_json
+                        )
+                        os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+                        logger.debug(f"Using per-user credentials from {config_dir}")
+                    except ValueError as e:
+                        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                        return
 
-            if session.message_count > 0:
-                options.resume = session.session_id
+                options = ClaudeAgentOptions(
+                    allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
+                    permission_mode="bypassPermissions",
+                    model=request.model or MODEL,
+                )
 
-            system_prompt = request.system_prompt or SYSTEM_PROMPT
-            if system_prompt:
-                options.system_prompt = system_prompt
+                if session.message_count > 0:
+                    options.resume = session.session_id
 
-            async for message in query(prompt=request.message, options=options):
-                # Capture session ID
-                if hasattr(message, 'subtype') and message.subtype == 'init':
-                    if hasattr(message, 'data') and 'session_id' in message.data:
-                        session.session_id = message.data['session_id']
-                        yield f"data: {{\"type\": \"session\", \"session_id\": \"{session.session_id}\"}}\n\n"
+                system_prompt = request.system_prompt or SYSTEM_PROMPT
+                if system_prompt:
+                    options.system_prompt = system_prompt
 
-                # Stream assistant messages
-                if hasattr(message, 'type') and message.type == 'assistant':
-                    if hasattr(message, 'message') and message.message:
-                        for block in message.message.content:
-                            if hasattr(block, 'text'):
-                                import json
-                                yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
+                async for message in query(prompt=request.message, options=options):
+                    # Capture session ID
+                    if hasattr(message, 'subtype') and message.subtype == 'init':
+                        if hasattr(message, 'data') and 'session_id' in message.data:
+                            session.session_id = message.data['session_id']
+                            yield f"data: {{\"type\": \"session\", \"session_id\": \"{session.session_id}\"}}\n\n"
 
-                # Stream final result
-                if hasattr(message, 'result'):
-                    import json
-                    yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
+                    # Stream assistant messages
+                    if hasattr(message, 'type') and message.type == 'assistant':
+                        if hasattr(message, 'message') and message.message:
+                            for block in message.message.content:
+                                if hasattr(block, 'text'):
+                                    yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
 
-            session.message_count += 1
-            session.last_used = time.time()
+                    # Stream final result
+                    if hasattr(message, 'result'):
+                        yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
 
-            yield "data: {\"type\": \"done\"}\n\n"
+                session.message_count += 1
+                session.last_used = time.time()
 
-        except Exception as e:
-            # Log full error but don't expose details to client (security)
-            logger.error(f"Error in stream for portal {request.portal_id}: {e}", exc_info=True)
-            import json
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error processing request'})}\n\n"
+                yield "data: {\"type\": \"done\"}\n\n"
+
+            except Exception as e:
+                # Log full error but don't expose details to client (security)
+                logger.error(f"Error in stream for portal {request.portal_id}: {e}", exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error processing request'})}\n\n"
+            finally:
+                # Restore original CLAUDE_CONFIG_DIR
+                if original_config_dir is not None:
+                    os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
+                elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
+                    del os.environ["CLAUDE_CONFIG_DIR"]
 
     return StreamingResponse(
         generate(),
