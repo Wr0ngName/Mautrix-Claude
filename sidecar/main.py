@@ -1061,9 +1061,7 @@ async def oauth_complete(request: OAuthCompleteRequest):
         if extra_drained > 0:
             logger.info(f"Drained {extra_drained} more bytes after pause")
 
-        # Send ESC key to cancel any pending Ink UI state/menu
-        os.write(master_fd, b"\x1b")  # ESC
-        time.sleep(0.1)
+        # NOTE: Don't send ESC - it would cancel the input prompt!
 
         # Log terminal state
         try:
@@ -1079,9 +1077,12 @@ async def oauth_complete(request: OAuthCompleteRequest):
             os.write(master_fd, char.encode())
             time.sleep(0.01)  # 10ms between characters (100 chars/sec typing speed)
 
-        # Send Enter (newline) to submit
-        os.write(master_fd, b"\n")
-        logger.info(f"Finished typing code, sent Enter")
+        # Send Enter to submit - try both CR and LF
+        # Different terminal modes/readline implementations handle these differently
+        os.write(master_fd, b"\r")  # Carriage return (Enter key in raw mode)
+        time.sleep(0.1)
+        os.write(master_fd, b"\n")  # Line feed
+        logger.info(f"Finished typing code, sent CR+LF")
 
         # Wait for CLI to process the code and write credentials
         # The CLI needs to make an API call to Anthropic to validate the code
