@@ -497,8 +497,12 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		model = c.Connector.Config.GetDefaultModel()
 	}
 
+	// Check if we're in sidecar mode (must do this before model resolution)
+	isSidecarMode := c.MessageClient.GetClientType() == "sidecar"
+
 	// Resolve family names (sonnet, opus, haiku) to actual model IDs
-	if IsModelFamily(model) {
+	// For sidecar mode, skip API resolution - the Agent SDK handles family names directly
+	if IsModelFamily(model) && !isSidecarMode {
 		family := GetModelFamilyName(model)
 		apiKey := c.getAPIKey()
 		if apiKey == "" {
@@ -537,7 +541,6 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	var messagesForAPI []claudeapi.Message
-	isSidecarMode := c.MessageClient.GetClientType() == "sidecar"
 	if isSidecarMode {
 		// Sidecar handles conversation history via Agent SDK session resume
 		messagesForAPI = []claudeapi.Message{userMessage}
