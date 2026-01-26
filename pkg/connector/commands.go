@@ -10,6 +10,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 )
 
 // RegisterCommands registers custom commands for the Claude AI bridge.
@@ -106,6 +107,16 @@ func (c *ClaudeConnector) RegisterCommands(proc *commands.Processor) {
 			},
 			RequiresLogin:  true,
 			RequiresPortal: true,
+		},
+		&commands.FullHandler{
+			Func: c.cmdRemoveGhost,
+			Name: "remove-ghost",
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionAdmin,
+				Description: "Remove a bridge ghost from the current room (admin only)",
+				Args:        "<@user:server>",
+			},
+			RequiresAdmin: true,
 		},
 	)
 }
@@ -842,4 +853,68 @@ func (c *ClaudeConnector) cmdTemperature(ce *commands.Event) {
 	}
 
 	ce.Reply("Temperature set to %.2f.", temp)
+}
+
+// cmdRemoveGhost removes a bridge ghost from the current room.
+// This is an admin-only command for cleaning up stale/buggy ghost users.
+func (c *ClaudeConnector) cmdRemoveGhost(ce *commands.Event) {
+	if len(ce.Args) == 0 {
+		ce.Reply("Usage: `remove-ghost <@user:server>`\n\nExample: `remove-ghost @claude_unknown:example.com`")
+		return
+	}
+
+	// Parse the Matrix user ID
+	userIDStr := ce.Args[0]
+	if !strings.HasPrefix(userIDStr, "@") {
+		ce.Reply("Invalid Matrix user ID. Must start with @")
+		return
+	}
+
+	userID := id.UserID(userIDStr)
+
+	// Verify it's a ghost controlled by this bridge (matches appservice namespace)
+	// The ghost should have localpart starting with the bridge's username template prefix
+	if _, isGhost := c.br.Matrix.ParseGhostMXID(userID); !isGhost {
+		ce.Reply("User `%s` is not a ghost controlled by this bridge.", userID)
+		return
+	}
+
+	// Get the room ID - prefer portal MXID, fall back to event room ID
+	roomID := ce.RoomID
+	if ce.Portal != nil && ce.Portal.MXID != "" {
+		roomID = ce.Portal.MXID
+	}
+
+	if roomID == "" {
+		ce.Reply("Could not determine room ID.")
+		return
+	}
+
+	// Get the ghost intent and make it leave
+	// We need to use the appservice to impersonate the ghost
+	matrixConn, ok := c.br.Matrix.(*matrix.Connector)
+	if !ok {
+		ce.Reply("Failed to access Matrix connector.")
+		return
+	}
+
+	// Create an intent for the ghost user
+	ghostIntent := matrixConn.AS.Intent(userID)
+
+	ctx, cancel := context.WithTimeout(ce.Ctx, 30*time.Second)
+	defer cancel()
+
+	// Make the ghost leave the room
+	if _, err := ghostIntent.LeaveRoom(ctx, roomID); err != nil {
+		ce.Reply("Failed to remove ghost from room: %v", err)
+		return
+	}
+
+	c.Log.Info().
+		Str("ghost", string(userID)).
+		Str("room", string(roomID)).
+		Str("admin", string(ce.User.MXID)).
+		Msg("Admin removed ghost from room")
+
+	ce.Reply("Successfully removed `%s` from this room.", userID)
 }
