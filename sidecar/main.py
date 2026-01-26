@@ -6,6 +6,7 @@ Provides HTTP API for Go bridge to communicate with Claude using Pro/Max subscri
 """
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import logging
@@ -15,8 +16,10 @@ import re
 import secrets
 import select
 import shutil
+import struct
 import subprocess
 import tempfile
+import termios
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -446,6 +449,11 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
     """
     # Create pseudo-terminal
     master, slave = pty.openpty()
+
+    # Set terminal size to 500 columns to prevent URL line-wrapping
+    # struct winsize: unsigned short rows, cols, xpixel, ypixel
+    winsize = struct.pack('HHHH', 24, 500, 0, 0)
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
 
     # Environment without browser
     env = os.environ.copy()
