@@ -122,6 +122,19 @@ func (c *ClaudeConnector) getAPIKeyFromLogin(ce *commands.Event) string {
 	return meta.APIKey
 }
 
+// isSidecarLogin checks if the user is logged in via sidecar (Pro/Max subscription).
+func (c *ClaudeConnector) isSidecarLogin(ce *commands.Event) bool {
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		return false
+	}
+	meta, ok := login.Metadata.(*UserLoginMetadata)
+	if !ok || meta == nil {
+		return false
+	}
+	return meta.CredentialsJSON != "" && meta.APIKey == ""
+}
+
 // cmdModel views or changes the Claude model for a conversation.
 func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 	if ce.Portal == nil {
@@ -160,42 +173,64 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 		return
 	}
 
-	// Get API key to validate model
-	apiKey := c.getAPIKeyFromLogin(ce)
-	if apiKey == "" {
-		ce.Reply("Failed to get API credentials.")
-		return
-	}
-
 	// Set new model - resolve alias if needed
 	newModel := strings.Join(ce.Args, "-")
+	isSidecar := c.isSidecarLogin(ce)
 
 	ctx, cancel := context.WithTimeout(ce.Ctx, 15*time.Second)
 	defer cancel()
 
-	// Map friendly shortcuts to latest model of that family (dynamically from API)
+	// Map friendly shortcuts to model families
 	switch strings.ToLower(newModel) {
 	case "opus", "claude-opus":
-		resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "opus")
-		if err != nil {
-			ce.Reply("Failed to resolve opus model: %v", err)
-			return
+		if isSidecar {
+			// Sidecar: just use "opus" - Agent SDK handles it
+			newModel = "opus"
+		} else {
+			apiKey := c.getAPIKeyFromLogin(ce)
+			if apiKey == "" {
+				ce.Reply("Failed to get API credentials.")
+				return
+			}
+			resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "opus")
+			if err != nil {
+				ce.Reply("Failed to resolve opus model: %v", err)
+				return
+			}
+			newModel = resolved
 		}
-		newModel = resolved
 	case "sonnet", "claude-sonnet":
-		resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "sonnet")
-		if err != nil {
-			ce.Reply("Failed to resolve sonnet model: %v", err)
-			return
+		if isSidecar {
+			newModel = "sonnet"
+		} else {
+			apiKey := c.getAPIKeyFromLogin(ce)
+			if apiKey == "" {
+				ce.Reply("Failed to get API credentials.")
+				return
+			}
+			resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "sonnet")
+			if err != nil {
+				ce.Reply("Failed to resolve sonnet model: %v", err)
+				return
+			}
+			newModel = resolved
 		}
-		newModel = resolved
 	case "haiku", "claude-haiku":
-		resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "haiku")
-		if err != nil {
-			ce.Reply("Failed to resolve haiku model: %v", err)
-			return
+		if isSidecar {
+			newModel = "haiku"
+		} else {
+			apiKey := c.getAPIKeyFromLogin(ce)
+			if apiKey == "" {
+				ce.Reply("Failed to get API credentials.")
+				return
+			}
+			resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "haiku")
+			if err != nil {
+				ce.Reply("Failed to resolve haiku model: %v", err)
+				return
+			}
+			newModel = resolved
 		}
-		newModel = resolved
 	default:
 		// Validate model ID format first (prevents abuse with overly long strings)
 		if err := ValidateModelID(newModel); err != nil {
@@ -203,11 +238,19 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 			return
 		}
 
-		// Validate the model exists via API
-		if err := claudeapi.ValidateModel(ctx, apiKey, newModel); err != nil {
-			ce.Reply("Invalid model: `%s`\n\nError: %v\n\nRun `models` to see available options.", newModel, err)
-			return
+		// For API mode, validate the model exists via API
+		if !isSidecar {
+			apiKey := c.getAPIKeyFromLogin(ce)
+			if apiKey == "" {
+				ce.Reply("Failed to get API credentials.")
+				return
+			}
+			if err := claudeapi.ValidateModel(ctx, apiKey, newModel); err != nil {
+				ce.Reply("Invalid model: `%s`\n\nError: %v\n\nRun `models` to see available options.", newModel, err)
+				return
+			}
 		}
+		// Sidecar mode: accept the model ID as-is, let sidecar validate
 	}
 
 	// Check if model family changed (need to swap ghosts)
@@ -265,6 +308,16 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 
 // cmdModels lists available Claude models by querying the API.
 func (c *ClaudeConnector) cmdModels(ce *commands.Event) {
+	// For sidecar mode, just show the available families
+	if c.isSidecarLogin(ce) {
+		ce.Reply("**Available Claude Models (Pro/Max):**\n\n" +
+			"**Opus:**\n• `opus` - Claude Opus (most capable)\n\n" +
+			"**Sonnet:**\n• `sonnet` - Claude Sonnet (balanced)\n\n" +
+			"**Haiku:**\n• `haiku` - Claude Haiku (fastest)\n\n" +
+			"Use `model <name>` to switch models.")
+		return
+	}
+
 	// Get API key
 	apiKey := c.getAPIKeyFromLogin(ce)
 	if apiKey == "" {
