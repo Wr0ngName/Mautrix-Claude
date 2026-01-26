@@ -66,9 +66,8 @@ const (
 )
 
 // ExampleConfig is the example configuration for the connector.
-const ExampleConfig = `# Claude API connector configuration
-
-# Default Claude model to use
+// Note: Do NOT add section headers here - framework adds "network:" wrapper automatically.
+const ExampleConfig = `# Default Claude model to use
 # Use family names (sonnet, opus, haiku) to automatically use the latest version
 # Or specify a full model ID for a specific version
 # Run the "models" command after login to see all available models
