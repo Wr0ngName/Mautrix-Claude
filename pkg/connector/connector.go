@@ -263,8 +263,9 @@ func (p *PortalMetadata) GetTemperature(defaultTemp float64) float64 {
 
 // UserLoginMetadata contains Claude-specific user login metadata.
 type UserLoginMetadata struct {
-	APIKey string `json:"api_key"`
-	Email  string `json:"email,omitempty"`
+	APIKey          string `json:"api_key"`
+	Email           string `json:"email,omitempty"`
+	CredentialsJSON string `json:"credentials_json,omitempty"` // For Pro/Max sidecar mode
 }
 
 // ValidateUserID validates that a user ID is a valid Claude ghost ID.

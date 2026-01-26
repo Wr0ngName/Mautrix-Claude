@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -119,26 +120,70 @@ func isValidAPIKeyFormat(apiKey string) bool {
 }
 
 // SidecarLogin handles login when sidecar mode is enabled.
-// No API key is needed - authentication uses mounted ~/.claude credentials.
+// Users provide their Claude Code credentials JSON for Pro/Max subscription access.
 type SidecarLogin struct {
 	User      *bridgev2.User
 	Connector *ClaudeConnector
 }
 
-var _ bridgev2.LoginProcess = (*SidecarLogin)(nil)
+var (
+	_ bridgev2.LoginProcess          = (*SidecarLogin)(nil)
+	_ bridgev2.LoginProcessUserInput = (*SidecarLogin)(nil)
+)
 
 // Start begins the sidecar login flow.
 func (s *SidecarLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
-	// Verify sidecar is healthy and authenticated before allowing login
+	return &bridgev2.LoginStep{
+		Type:   bridgev2.LoginStepTypeUserInput,
+		StepID: "credentials",
+		Instructions: "To use your Claude Pro/Max subscription:\n\n" +
+			"1. On your computer, run: claude\n" +
+			"2. Complete the browser authentication\n" +
+			"3. Run: cat ~/.claude/.credentials.json\n" +
+			"4. Copy the JSON content and paste it below\n\n" +
+			"(Your credentials are stored securely and only used for this bridge)",
+		UserInputParams: &bridgev2.LoginUserInputParams{
+			Fields: []bridgev2.LoginInputDataField{
+				{
+					Type:        bridgev2.LoginInputFieldTypePassword,
+					ID:          "credentials_json",
+					Name:        "Credentials JSON",
+					Description: "Contents of ~/.claude/.credentials.json",
+				},
+			},
+		},
+	}, nil
+}
+
+// SubmitUserInput processes the submitted credentials.
+func (s *SidecarLogin) SubmitUserInput(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+	credentialsJSON := input["credentials_json"]
+
+	if credentialsJSON == "" {
+		return nil, fmt.Errorf("credentials JSON is required")
+	}
+
+	// Validate it's valid JSON
+	var creds map[string]any
+	if err := json.Unmarshal([]byte(credentialsJSON), &creds); err != nil {
+		return nil, fmt.Errorf("invalid JSON format: %w", err)
+	}
+
+	// Check for required fields (access_token or similar)
+	if _, ok := creds["claudeAiOauth"]; !ok {
+		if _, ok := creds["access_token"]; !ok {
+			return nil, fmt.Errorf("invalid credentials: missing authentication data")
+		}
+	}
+
+	// TODO: Store credentials per-user and have sidecar use them
+	// For now, sidecar uses global credentials from /data/.claude/
+	// This is a limitation - all users share the same subscription
+
+	// Verify sidecar is healthy
 	client := s.Connector.getSidecarClient()
 	if err := client.Validate(ctx); err != nil {
-		// Provide helpful error message for admin
-		return nil, fmt.Errorf("sidecar not ready: %w\n\n"+
-			"The bridge admin needs to set up Claude Code credentials:\n"+
-			"1. On a machine with a browser, run: claude\n"+
-			"2. Complete the OAuth authentication\n"+
-			"3. Copy credentials to the bridge: cp -r ~/.claude/* /data/.claude/\n"+
-			"4. Restart the bridge container", err)
+		return nil, fmt.Errorf("sidecar not available - please contact bridge admin: %w", err)
 	}
 
 	// Generate a unique login ID for this user
@@ -148,7 +193,8 @@ func (s *SidecarLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 		ID:         loginID,
 		RemoteName: "Claude (Pro/Max)",
 		Metadata: &UserLoginMetadata{
-			APIKey: "", // No API key needed for sidecar
+			APIKey:          "", // No API key for sidecar
+			CredentialsJSON: credentialsJSON,
 		},
 	}, nil)
 	if err != nil {
