@@ -77,9 +77,10 @@ type SessionStats struct {
 
 // HealthResponse is the response from the health endpoint.
 type HealthResponse struct {
-	Status        string `json:"status"`
-	Sessions      int    `json:"sessions"`
-	Authenticated bool   `json:"authenticated"`
+	Status        string  `json:"status"`        // "healthy" or "degraded"
+	Sessions      int     `json:"sessions"`      // Active session count
+	Authenticated bool    `json:"authenticated"` // Whether Claude Code auth is valid
+	Message       *string `json:"message"`       // Error message if not authenticated
 }
 
 // NewClient creates a new sidecar client with the specified timeout.

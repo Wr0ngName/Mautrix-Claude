@@ -376,23 +376,18 @@ async def health():
     """
     Health check endpoint.
 
-    Returns 200 OK when sidecar is healthy and authenticated.
-    Returns 503 Service Unavailable when not authenticated.
+    Always returns 200 OK so the sidecar is considered "running".
+    The "authenticated" field indicates whether Claude Code auth is valid.
+    The "status" field is "healthy" only when authenticated.
+
+    Consumers should check the "authenticated" field to determine if
+    the sidecar can actually process requests.
     """
-    if not _auth_validated:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "status": "unhealthy",
-                "sessions": len(session_manager.sessions),
-                "authenticated": False,
-                "error": "Claude Code not authenticated. Run 'claude' to authenticate."
-            }
-        )
     return {
-        "status": "healthy",
+        "status": "healthy" if _auth_validated else "degraded",
         "sessions": len(session_manager.sessions),
-        "authenticated": True
+        "authenticated": _auth_validated,
+        "message": None if _auth_validated else "Claude Code not authenticated - run 'claude' to authenticate"
     }
 
 

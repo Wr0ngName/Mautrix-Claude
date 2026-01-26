@@ -69,12 +69,16 @@ SIDECAR_ENABLED=$(yq e '.network.sidecar.enabled // false' /data/config.yaml)
 if [[ "$SIDECAR_ENABLED" == "true" ]]; then
 	echo "Sidecar mode enabled (Pro/Max subscription via Agent SDK)"
 	if ! start_sidecar; then
-		echo "ERROR: Sidecar mode is enabled but sidecar failed to start!"
-		echo "Ensure Claude Code credentials are valid:"
-		echo "  1. Copy ~/.claude/* to ./data/.claude/ on the host"
-		echo "  2. Restart the container"
-		echo "Or disable sidecar mode in config.yaml: network.sidecar.enabled: false"
-		exit 1
+		echo "WARNING: Sidecar failed to start - Pro/Max login will not be available"
+		echo "To fix: copy ~/.claude/* to ./data/.claude/ and restart"
+	else
+		# Check if sidecar is authenticated
+		AUTH_STATUS=$(curl -sf http://localhost:8090/health | yq -r '.authenticated // "unknown"')
+		if [[ "$AUTH_STATUS" != "true" ]]; then
+			echo "WARNING: Sidecar running but Claude Code not authenticated"
+			echo "Pro/Max login will fail until credentials are configured"
+			echo "To fix: copy ~/.claude/* to ./data/.claude/ and restart"
+		fi
 	fi
 else
 	echo "API mode (direct Anthropic API)"
