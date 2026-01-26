@@ -817,6 +817,31 @@ async def get_session(portal_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+def _cleanup_oauth_flow(flow_data: dict) -> None:
+    """Clean up resources from an OAuth flow (PTY, process, config dir)."""
+    # Close PTY master fd
+    try:
+        os.close(flow_data.get("master_fd", -1))
+    except:
+        pass
+    # Terminate process
+    try:
+        proc = flow_data.get("proc")
+        if proc:
+            proc.terminate()
+            proc.wait(timeout=2)
+    except:
+        pass
+    # Remove config directory
+    try:
+        config_dir = flow_data.get("config_dir")
+        if config_dir:
+            shutil.rmtree(config_dir, ignore_errors=True)
+            logger.debug(f"Cleaned up OAuth config dir: {config_dir}")
+    except:
+        pass
+
+
 @app.post("/v1/auth/oauth/start", response_model=OAuthStartResponse)
 async def oauth_start(request: OAuthStartRequest):
     """
@@ -828,12 +853,12 @@ async def oauth_start(request: OAuthStartRequest):
     if not request.user_id:
         raise HTTPException(status_code=400, detail="user_id required")
 
-    # Generate state for this flow
+    # Generate state for this flow (used for both CSRF protection and unique directory)
     state = secrets.token_urlsafe(32)
 
-    # Create temp config dir for this user's OAuth flow
-    user_hash = hashlib.sha256(request.user_id.encode()).hexdigest()[:16]
-    config_dir = str(Path(tempfile.gettempdir()) / f"claude-oauth-{user_hash}")
+    # Create temp config dir using state (unique per flow, not per user)
+    # This allows same user to have multiple concurrent login attempts
+    config_dir = str(Path(tempfile.gettempdir()) / f"claude-oauth-{state[:16]}")
     Path(config_dir).mkdir(parents=True, exist_ok=True)
 
     try:
@@ -847,15 +872,7 @@ async def oauth_start(request: OAuthStartRequest):
             expired_states = [s for s, data in _oauth_pending.items()
                              if now - data["created_at"] > OAUTH_PENDING_TIMEOUT]
             for s in expired_states:
-                # Cleanup expired flow resources
-                try:
-                    os.close(data.get("master_fd", -1))
-                except:
-                    pass
-                try:
-                    data.get("proc").terminate()
-                except:
-                    pass
+                _cleanup_oauth_flow(data)
                 del _oauth_pending[s]
 
             # Store this flow
@@ -871,6 +888,8 @@ async def oauth_start(request: OAuthStartRequest):
         return OAuthStartResponse(auth_url=auth_url, state=state)
 
     except Exception as e:
+        # Clean up on failure
+        shutil.rmtree(config_dir, ignore_errors=True)
         logger.error(f"Failed to start OAuth flow: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start OAuth: {e}")
 
@@ -904,26 +923,19 @@ async def oauth_complete(request: OAuthCompleteRequest):
 
         # Check expiration
         if time.time() - flow_data["created_at"] > OAUTH_PENDING_TIMEOUT:
-            # Cleanup
-            try:
-                os.close(flow_data.get("master_fd", -1))
-            except:
-                pass
-            try:
-                flow_data.get("proc").terminate()
-            except:
-                pass
+            _cleanup_oauth_flow(flow_data)
             del _oauth_pending[request.state]
             return OAuthCompleteResponse(
                 success=False,
                 message="OAuth flow expired. Please start the login flow again."
             )
 
-        master_fd = flow_data["master_fd"]
-        proc = flow_data["proc"]
-        config_dir = flow_data["config_dir"]
-        # Remove pending flow
+        # Remove from pending (we'll handle cleanup after completion)
         del _oauth_pending[request.state]
+
+    master_fd = flow_data["master_fd"]
+    proc = flow_data["proc"]
+    config_dir = flow_data["config_dir"]
 
     # Send code to claude setup-token
     try:
@@ -955,18 +967,15 @@ async def oauth_complete(request: OAuthCompleteRequest):
             if 'error' in clean.lower() or 'failed' in clean.lower() or 'invalid' in clean.lower():
                 break
 
-        # Cleanup PTY
+        # Close PTY and wait for process
         try:
             os.close(master_fd)
         except:
             pass
         try:
-            proc.terminate()
+            proc.wait(timeout=5)
         except:
-            pass
-
-        # Check exit code
-        proc.wait(timeout=5)
+            proc.terminate()
 
         # Read credentials from the config dir
         creds_file = Path(config_dir) / ".credentials.json"
@@ -975,6 +984,10 @@ async def oauth_complete(request: OAuthCompleteRequest):
             # Validate it's proper JSON
             json.loads(credentials_json)
 
+            # Clean up config directory AFTER reading credentials
+            shutil.rmtree(config_dir, ignore_errors=True)
+            logger.debug(f"Cleaned up OAuth config dir: {config_dir}")
+
             logger.info(f"OAuth completed successfully for user {request.user_id[:20]}...")
             return OAuthCompleteResponse(
                 success=True,
@@ -982,6 +995,9 @@ async def oauth_complete(request: OAuthCompleteRequest):
                 message="Login successful! Your credentials have been saved."
             )
         else:
+            # Clean up config directory on failure too
+            shutil.rmtree(config_dir, ignore_errors=True)
+
             # Parse error from output
             decoded = output.decode('utf-8', errors='ignore')
             clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
@@ -994,7 +1010,7 @@ async def oauth_complete(request: OAuthCompleteRequest):
 
     except Exception as e:
         logger.error(f"OAuth completion error: {e}")
-        # Cleanup
+        # Clean up everything on error
         try:
             os.close(master_fd)
         except:
@@ -1003,6 +1019,7 @@ async def oauth_complete(request: OAuthCompleteRequest):
             proc.terminate()
         except:
             pass
+        shutil.rmtree(config_dir, ignore_errors=True)
         return OAuthCompleteResponse(
             success=False,
             message=f"Authentication error: {e}"
