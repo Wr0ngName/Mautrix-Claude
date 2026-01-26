@@ -337,11 +337,11 @@ func MakeClaudeGhostID(model string) networkid.UserID {
 }
 
 // MakeClaudePortalKey creates a portal key from a conversation identifier.
-// The loginID is used as the Receiver to ensure portal isolation between users.
-func MakeClaudePortalKey(conversationID string, loginID networkid.UserLoginID) networkid.PortalKey {
+// Receiver is intentionally not set so that FindPreferredLogin works properly
+// and users can switch between logins using set-preferred-login command.
+func MakeClaudePortalKey(conversationID string) networkid.PortalKey {
 	return networkid.PortalKey{
-		ID:       networkid.PortalID(conversationID),
-		Receiver: loginID,
+		ID: networkid.PortalID(conversationID),
 	}
 }
 

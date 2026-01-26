@@ -591,7 +591,7 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 
 	// Create a unique conversation/portal ID based on the room
 	conversationID := fmt.Sprintf("room_%s", roomID)
-	portalKey := MakeClaudePortalKey(conversationID, login.ID)
+	portalKey := MakeClaudePortalKey(conversationID)
 
 	// Get or create the portal
 	ctx := ce.Ctx
