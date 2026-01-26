@@ -1063,28 +1063,46 @@ async def oauth_complete(request: OAuthCompleteRequest):
         os.write(master_fd, b"\n")
         logger.info(f"Finished typing code, sent Enter")
 
-        # Give the CLI time to process the input and make API call
-        time.sleep(2.0)
-
-        # Read output to check for success
+        # Wait for CLI to process the code and write credentials
+        # The CLI needs to make an API call to Anthropic to validate the code
+        # It may exit silently after writing credentials, or show a new prompt
         output = b''
         start_time = time.time()
+        creds_file = Path(config_dir) / ".credentials.json"
+        default_creds = Path.home() / ".claude" / ".credentials.json"
         success_detected = False
         error_detected = False
 
-        while time.time() - start_time < 30:  # 30 second timeout
+        logger.info("Waiting for CLI to process code (checking for credentials file or process exit)...")
+
+        while time.time() - start_time < 45:  # 45 second timeout for API call
+            # Check if credentials file appeared (success!)
+            if creds_file.exists():
+                logger.info(f"Credentials file appeared at {creds_file}")
+                success_detected = True
+                break
+            if default_creds.exists():
+                # Check if it was modified recently (within last 60 seconds)
+                try:
+                    mtime = default_creds.stat().st_mtime
+                    if time.time() - mtime < 60:
+                        logger.info(f"Credentials file appeared at default location {default_creds}")
+                        success_detected = True
+                        break
+                except:
+                    pass
+
+            # Read any available output (non-blocking)
             ready, _, _ = select.select([master_fd], [], [], 0.5)
             if ready:
                 try:
                     data = os.read(master_fd, 4096)
                     if data:
                         output += data
-                        # Log the raw data for debugging
                         decoded_chunk = data.decode('utf-8', errors='replace')
                         logger.debug(f"OAuth read {len(data)} bytes (total: {len(output)}): {decoded_chunk[:100]!r}")
                 except OSError as e:
                     logger.debug(f"OAuth read OSError: {e}")
-                    break
 
             # Check if process completed
             poll_result = proc.poll()
@@ -1102,17 +1120,13 @@ async def oauth_complete(request: OAuthCompleteRequest):
                         output += data
                 except:
                     pass
+                # Give a moment for file system to sync
+                time.sleep(0.5)
                 break
 
-            # Check for success indicators
+            # Check output for error indicators
             decoded = output.decode('utf-8', errors='ignore')
-            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', decoded)
-            if 'success' in clean.lower() or 'authenticated' in clean.lower():
-                logger.info("OAuth success indicator detected in output")
-                success_detected = True
-                # Wait a bit more for credentials to be written
-                time.sleep(1)
-                break
+            clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', decoded)
             if 'error' in clean.lower() or 'failed' in clean.lower() or 'invalid' in clean.lower():
                 logger.warning("OAuth error indicator detected in output")
                 error_detected = True
@@ -1120,7 +1134,7 @@ async def oauth_complete(request: OAuthCompleteRequest):
 
         # Log final state
         elapsed = time.time() - start_time
-        logger.info(f"OAuth output collection complete: {len(output)} bytes in {elapsed:.1f}s, success={success_detected}, error={error_detected}")
+        logger.info(f"OAuth wait complete: {len(output)} bytes in {elapsed:.1f}s, success={success_detected}, error={error_detected}")
 
         # Close PTY and wait for process
         try:
@@ -1132,9 +1146,6 @@ async def oauth_complete(request: OAuthCompleteRequest):
         except:
             proc.terminate()
 
-        # Read credentials from the config dir
-        creds_file = Path(config_dir) / ".credentials.json"
-
         # Log what files exist in config dir for debugging
         try:
             config_files = list(Path(config_dir).iterdir())
@@ -1142,34 +1153,33 @@ async def oauth_complete(request: OAuthCompleteRequest):
         except Exception as e:
             logger.debug(f"Could not list config dir: {e}")
 
-        # Also check default location in case CLI ignores CLAUDE_CONFIG_DIR
-        default_creds = Path.home() / ".claude" / ".credentials.json"
+        # Check for credentials - try custom config dir first, then default location
+        credentials_json = None
+        creds_source = None
 
         if creds_file.exists():
             credentials_json = creds_file.read_text()
+            creds_source = "custom"
+        elif default_creds.exists():
+            # Check if default location was modified recently
+            try:
+                mtime = default_creds.stat().st_mtime
+                if time.time() - mtime < 120:  # Modified in last 2 minutes
+                    credentials_json = default_creds.read_text()
+                    creds_source = "default"
+                    logger.warning(f"Credentials found at default location instead of {config_dir}")
+            except:
+                pass
+
+        if credentials_json:
             # Validate it's proper JSON
             json.loads(credentials_json)
 
-            # Clean up config directory AFTER reading credentials
+            # Clean up config directory
             shutil.rmtree(config_dir, ignore_errors=True)
             logger.debug(f"Cleaned up OAuth config dir: {config_dir}")
 
-            logger.info(f"OAuth completed successfully for user {request.user_id[:20]}...")
-            return OAuthCompleteResponse(
-                success=True,
-                credentials_json=credentials_json,
-                message="Login successful! Your credentials have been saved."
-            )
-        elif default_creds.exists():
-            # CLI wrote to default location instead of our config dir
-            logger.warning(f"Credentials found at default location instead of {config_dir}")
-            credentials_json = default_creds.read_text()
-            json.loads(credentials_json)
-
-            # Clean up our config dir
-            shutil.rmtree(config_dir, ignore_errors=True)
-
-            logger.info(f"OAuth completed successfully (from default path) for user {request.user_id[:20]}...")
+            logger.info(f"OAuth completed successfully (from {creds_source}) for user {request.user_id[:20]}...")
             return OAuthCompleteResponse(
                 success=True,
                 credentials_json=credentials_json,
