@@ -136,20 +136,11 @@ func (c *ClaudeConnector) GetBridgeInfoVersion() (info, capabilities int) {
 }
 
 // GetConfig returns the connector configuration.
+// We return nil upgrader to use NoopUpgrader - the mautrix configupgrade system
+// is dangerous and can silently overwrite user config values. Combined with
+// --no-update flag in docker-run.sh, this ensures user config is never modified.
 func (c *ClaudeConnector) GetConfig() (example string, data any, upgrader configupgrade.Upgrader) {
-	return ExampleConfig, &c.Config, configupgrade.SimpleUpgrader(upgradeConfig)
-}
-
-// upgradeConfig copies config values from the user's config file to the base config.
-// This is called by the configupgrade system during config loading.
-func upgradeConfig(helper configupgrade.Helper) {
-	helper.Copy(configupgrade.Str, "default_model")
-	helper.Copy(configupgrade.Int, "max_tokens")
-	helper.Copy(configupgrade.Float, "temperature")
-	helper.Copy(configupgrade.Str, "system_prompt")
-	helper.Copy(configupgrade.Int, "conversation_max_age_hours")
-	helper.Copy(configupgrade.Int, "rate_limit_per_minute")
-	helper.Copy(configupgrade.Bool, "sidecar", "enabled")
+	return ExampleConfig, &c.Config, nil
 }
 
 // ValidateConfig validates the loaded configuration.
