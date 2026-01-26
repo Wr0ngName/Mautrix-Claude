@@ -83,10 +83,17 @@ type ContentDelta struct {
 }
 
 // APIError represents an error from the Claude API.
+// This struct is populated from API error responses and includes retry guidance.
 type APIError struct {
-	Type       string `json:"type"`
-	Message    string `json:"message"`
-	RetryAfter int    `json:"-"` // Retry-After header value in seconds
+	// Type is the error type from the API (e.g., "rate_limit_error", "invalid_request_error")
+	Type string `json:"type"`
+	// Message is the human-readable error message from the API
+	Message string `json:"message"`
+	// RetryAfter is the suggested wait time in seconds before retrying.
+	// This value comes from the HTTP Retry-After header when present (e.g., on 429 responses).
+	// Use GetRetryAfter() helper function to extract this from errors.
+	// Zero means no retry guidance was provided.
+	RetryAfter int `json:"-"`
 }
 
 // Error implements the error interface.

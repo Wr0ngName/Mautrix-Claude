@@ -101,6 +101,8 @@ func ValidateModel(ctx context.Context, apiKey string, modelID string) error {
 // inferModelFamily infers the model family from the model ID.
 // Returns empty string if family cannot be determined from the model name.
 // Valid Claude models always contain "opus", "sonnet", or "haiku" in their name.
+// Note: Unknown models are not logged here to avoid log spam during bulk operations.
+// Callers should handle and log unknown models at the appropriate level.
 func inferModelFamily(modelID string) string {
 	id := strings.ToLower(modelID)
 	switch {
@@ -112,6 +114,7 @@ func inferModelFamily(modelID string) string {
 		return "haiku"
 	default:
 		// Return empty string for unrecognized models - caller must handle this
+		// This includes future Claude models that may have different naming
 		return ""
 	}
 }

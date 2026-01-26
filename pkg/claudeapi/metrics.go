@@ -13,7 +13,6 @@ type Metrics struct {
 	TotalRequests      atomic.Int64
 	SuccessfulRequests atomic.Int64
 	FailedRequests     atomic.Int64
-	RetriedRequests    atomic.Int64
 
 	// Token usage
 	TotalInputTokens  atomic.Int64
@@ -24,6 +23,13 @@ type Metrics struct {
 	AuthErrors      atomic.Int64
 	ServerErrors    atomic.Int64
 	OtherErrors     atomic.Int64
+
+	// Local rate limiting metrics (bridge-side rate limiter)
+	LocalRateLimitRejects atomic.Int64
+
+	// Circuit breaker metrics (for sidecar client)
+	CircuitBreakerRejects atomic.Int64
+	CircuitBreakerOpens   atomic.Int64
 
 	// Timing
 	totalDuration atomic.Int64 // stored as nanoseconds
@@ -82,9 +88,19 @@ func (m *Metrics) RecordError(err error) {
 	}
 }
 
-// RecordRetry records a retry attempt.
-func (m *Metrics) RecordRetry() {
-	m.RetriedRequests.Add(1)
+// RecordLocalRateLimitReject records when the local rate limiter rejects a request.
+func (m *Metrics) RecordLocalRateLimitReject() {
+	m.LocalRateLimitRejects.Add(1)
+}
+
+// RecordCircuitBreakerReject records when the circuit breaker rejects a request.
+func (m *Metrics) RecordCircuitBreakerReject() {
+	m.CircuitBreakerRejects.Add(1)
+}
+
+// RecordCircuitBreakerOpen records when the circuit breaker opens due to failures.
+func (m *Metrics) RecordCircuitBreakerOpen() {
+	m.CircuitBreakerOpens.Add(1)
 }
 
 // getOrCreateModelMetrics gets or creates metrics for a model.
@@ -169,19 +185,21 @@ func (m *Metrics) GetAllModelNames() []string {
 // Snapshot returns a snapshot of the current metrics as a map.
 func (m *Metrics) Snapshot() map[string]interface{} {
 	return map[string]interface{}{
-		"total_requests":      m.TotalRequests.Load(),
-		"successful_requests": m.SuccessfulRequests.Load(),
-		"failed_requests":     m.FailedRequests.Load(),
-		"retried_requests":    m.RetriedRequests.Load(),
-		"total_input_tokens":  m.TotalInputTokens.Load(),
-		"total_output_tokens": m.TotalOutputTokens.Load(),
-		"total_tokens":        m.GetTotalTokens(),
-		"rate_limit_errors":   m.RateLimitErrors.Load(),
-		"auth_errors":         m.AuthErrors.Load(),
-		"server_errors":       m.ServerErrors.Load(),
-		"other_errors":        m.OtherErrors.Load(),
-		"average_duration_ms": m.GetAverageRequestDuration().Milliseconds(),
-		"error_rate_percent":  m.GetErrorRate(),
+		"total_requests":           m.TotalRequests.Load(),
+		"successful_requests":      m.SuccessfulRequests.Load(),
+		"failed_requests":          m.FailedRequests.Load(),
+		"total_input_tokens":       m.TotalInputTokens.Load(),
+		"total_output_tokens":      m.TotalOutputTokens.Load(),
+		"total_tokens":             m.GetTotalTokens(),
+		"rate_limit_errors":        m.RateLimitErrors.Load(),
+		"auth_errors":              m.AuthErrors.Load(),
+		"server_errors":            m.ServerErrors.Load(),
+		"other_errors":             m.OtherErrors.Load(),
+		"local_rate_limit_rejects": m.LocalRateLimitRejects.Load(),
+		"circuit_breaker_rejects":  m.CircuitBreakerRejects.Load(),
+		"circuit_breaker_opens":    m.CircuitBreakerOpens.Load(),
+		"average_duration_ms":      m.GetAverageRequestDuration().Milliseconds(),
+		"error_rate_percent":       m.GetErrorRate(),
 	}
 }
 
@@ -190,13 +208,15 @@ func (m *Metrics) Reset() {
 	m.TotalRequests.Store(0)
 	m.SuccessfulRequests.Store(0)
 	m.FailedRequests.Store(0)
-	m.RetriedRequests.Store(0)
 	m.TotalInputTokens.Store(0)
 	m.TotalOutputTokens.Store(0)
 	m.RateLimitErrors.Store(0)
 	m.AuthErrors.Store(0)
 	m.ServerErrors.Store(0)
 	m.OtherErrors.Store(0)
+	m.LocalRateLimitRejects.Store(0)
+	m.CircuitBreakerRejects.Store(0)
+	m.CircuitBreakerOpens.Store(0)
 	m.totalDuration.Store(0)
 	m.requestCount.Store(0)
 

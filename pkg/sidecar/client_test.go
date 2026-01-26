@@ -354,6 +354,64 @@ func TestDeleteSession(t *testing.T) {
 	}
 }
 
+func TestDeleteUser(t *testing.T) {
+	tests := []struct {
+		name           string
+		userID         string
+		serverResponse func(w http.ResponseWriter, r *http.Request)
+		wantErr        bool
+	}{
+		{
+			name:   "successful delete",
+			userID: "@user:example.com",
+			serverResponse: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/users/@user:example.com" {
+					t.Errorf("Expected path '/v1/users/@user:example.com', got '%s'", r.URL.Path)
+				}
+				if r.Method != "DELETE" {
+					t.Errorf("Expected DELETE method, got '%s'", r.Method)
+				}
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"status": "deleted", "user_id": "@user:example.com"}`))
+			},
+			wantErr: false,
+		},
+		{
+			name:   "user not found (should not error)",
+			userID: "nonexistent",
+			serverResponse: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+			wantErr: false, // 404 is acceptable for delete
+		},
+		{
+			name:   "server error",
+			userID: "@user:example.com",
+			serverResponse: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte("internal error"))
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(tt.serverResponse))
+			defer server.Close()
+
+			client := NewClient(server.URL, 30*time.Second, zerolog.Nop())
+			ctx := context.Background()
+
+			err := client.DeleteUser(ctx, tt.userID)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("DeleteUser() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestGetSession(t *testing.T) {
 	tests := []struct {
 		name           string

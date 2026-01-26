@@ -26,7 +26,7 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 from starlette.responses import Response
 
 # Agent SDK imports
-from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import query, ClaudeAgentOptions
 
 # Configure logging
 logging.basicConfig(
@@ -317,9 +317,10 @@ class CredentialsManager:
                 creds_data = json.loads(credentials_json)
                 creds_file.write_text(json.dumps(creds_data, indent=2))
                 logger.debug(f"Set up credentials for user {user_id[:20]}...")
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid credentials JSON for user {user_id}: {e}")
-                raise ValueError(f"Invalid credentials JSON: {e}")
+            except json.JSONDecodeError:
+                # Don't log exception details as they may contain credential fragments
+                logger.error(f"Invalid credentials JSON format for user {user_id[:20]}...")
+                raise ValueError("Invalid credentials JSON format")
 
             # Create minimal settings.json - Claude CLI requires this
             settings_file = user_dir / "settings.json"
@@ -708,6 +709,23 @@ async def get_session(portal_id: str):
         return stats
     else:
         raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.delete("/v1/users/{user_id}")
+async def delete_user(user_id: str):
+    """
+    Remove all stored credentials for a user (logout).
+
+    This cleans up the user's credential directory used for Pro/Max authentication.
+    Should be called when a user logs out from the bridge.
+    """
+    try:
+        await credentials_manager.cleanup_user(user_id)
+        logger.info(f"Cleaned up credentials for user: {user_id}")
+        return {"status": "deleted", "user_id": user_id}
+    except Exception as e:
+        logger.error(f"Failed to cleanup user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup user: {str(e)}")
 
 
 if __name__ == "__main__":

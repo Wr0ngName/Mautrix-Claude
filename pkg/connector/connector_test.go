@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 func TestNewConnector(t *testing.T) {
@@ -219,42 +218,6 @@ func TestImplementsInterfaces(t *testing.T) {
 	t.Run("implements NetworkConnector", func(t *testing.T) {
 		var _ bridgev2.NetworkConnector = (*ClaudeConnector)(nil)
 	})
-}
-
-func TestMakeClaudeGhostID(t *testing.T) {
-	tests := []struct {
-		name  string
-		model string
-	}{
-		{
-			name:  "creates ghost ID for sonnet",
-			model: "claude-3-5-sonnet-20241022",
-		},
-		{
-			name:  "creates ghost ID for opus",
-			model: "claude-opus-4-5-20251101",
-		},
-		{
-			name:  "creates ghost ID for haiku",
-			model: "claude-3-5-haiku-20241022",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ghostID := MakeClaudeGhostID(tt.model)
-
-			if ghostID == "" {
-				t.Error("ghost ID should not be empty")
-			}
-
-			// Should contain model identifier
-			idStr := string(ghostID)
-			if idStr == "" {
-				t.Error("ghost ID string should not be empty")
-			}
-		})
-	}
 }
 
 func TestMakeClaudePortalKey(t *testing.T) {

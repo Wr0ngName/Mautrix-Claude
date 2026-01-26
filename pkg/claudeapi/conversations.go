@@ -156,23 +156,6 @@ func (cm *ConversationManager) DeleteMessageByID(externalID string) bool {
 	return false
 }
 
-// GetMessageByID returns the content of a message by its external ID.
-func (cm *ConversationManager) GetMessageByID(externalID string) (string, bool) {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-
-	for _, tm := range cm.messages {
-		if tm.ExternalID == externalID {
-			if len(tm.Content) > 0 {
-				return tm.Content[0].Text, true
-			}
-			return "", true
-		}
-	}
-
-	return "", false
-}
-
 // EditLastUserMessage edits the most recent user message.
 // Removes any assistant messages that came after it.
 // Returns an error if there's no user message to edit.

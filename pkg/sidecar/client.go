@@ -15,21 +15,47 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Retry and circuit breaker configuration
+// Retry and circuit breaker configuration.
+// These constants control the resilience behavior of the sidecar client.
 const (
-	maxRetries       = 3
-	initialBackoff   = 100 * time.Millisecond
-	maxBackoff       = 5 * time.Second
-	circuitThreshold = 5                // failures before opening circuit
-	circuitTimeout   = 30 * time.Second // time before trying again
+	// maxRetries is the maximum number of retry attempts for failed requests.
+	// After this many failures, the request returns an error to the caller.
+	maxRetries = 3
+
+	// initialBackoff is the starting delay for exponential backoff between retries.
+	// Each subsequent retry doubles this delay (100ms -> 200ms -> 400ms -> ...).
+	initialBackoff = 100 * time.Millisecond
+
+	// maxBackoff caps the exponential backoff delay to prevent excessive waits.
+	maxBackoff = 5 * time.Second
+
+	// circuitThreshold is the number of consecutive failures required to open the circuit.
+	// Once opened, all requests fail immediately until circuitTimeout passes.
+	circuitThreshold = 5
+
+	// circuitTimeout is how long the circuit stays open before allowing a test request.
+	// After this duration, the circuit enters "half-open" state and allows one request through.
+	// If that request succeeds, circuit closes. If it fails, circuit reopens.
+	circuitTimeout = 30 * time.Second
 )
 
-// CircuitState represents the state of the circuit breaker
+// CircuitState represents the state of the circuit breaker.
+// The circuit breaker pattern prevents cascading failures by failing fast when
+// a downstream service is unhealthy.
+//
+// State transitions:
+//   - Closed -> Open: After circuitThreshold consecutive failures
+//   - Open -> HalfOpen: After circuitTimeout passes
+//   - HalfOpen -> Closed: On successful request
+//   - HalfOpen -> Open: On failed request
 type CircuitState int
 
 const (
+	// CircuitClosed allows all requests through (normal operation).
 	CircuitClosed CircuitState = iota
+	// CircuitOpen rejects all requests immediately (service is unhealthy).
 	CircuitOpen
+	// CircuitHalfOpen allows one test request to check if service recovered.
 	CircuitHalfOpen
 )
 
@@ -388,10 +414,38 @@ func (c *Client) GetSession(ctx context.Context, portalID string) (*SessionStats
 	return &stats, nil
 }
 
-// truncate truncates a string to maxLen characters.
+// DeleteUser removes all stored credentials for a user (logout).
+// This should be called when a user logs out from the bridge.
+func (c *Client) DeleteUser(ctx context.Context, userID string) error {
+	req, err := http.NewRequestWithContext(ctx, "DELETE", c.baseURL+"/v1/users/"+userID, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete user failed: %s - %s", resp.Status, string(body))
+	}
+
+	c.log.Debug().
+		Str("user_id", userID).
+		Msg("Deleted user credentials from sidecar")
+
+	return nil
+}
+
+// truncate truncates a string to maxLen runes (not bytes).
+// This ensures proper UTF-8 handling and won't split multi-byte characters.
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }

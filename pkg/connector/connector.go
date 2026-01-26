@@ -59,8 +59,10 @@ func (c *ClaudeConnector) Start(ctx context.Context) error {
 
 	// Validate sidecar connectivity if enabled
 	if c.Config.Sidecar.Enabled {
-		c.Log.Info().Str("url", SidecarURL).Msg("Sidecar mode enabled, checking connectivity")
-		client := sidecar.NewClient(SidecarURL, time.Duration(SidecarTimeout)*time.Second, c.Log)
+		sidecarURL := c.Config.Sidecar.GetURL()
+		sidecarTimeout := c.Config.Sidecar.GetTimeout()
+		c.Log.Info().Str("url", sidecarURL).Msg("Sidecar mode enabled, checking connectivity")
+		client := sidecar.NewClient(sidecarURL, time.Duration(sidecarTimeout)*time.Second, c.Log)
 		health, err := client.Health(ctx)
 		if err != nil {
 			c.Log.Warn().Err(err).Msg("Sidecar health check failed - Pro/Max login will not be available")
@@ -88,19 +90,21 @@ func (c *ClaudeConnector) Start(ctx context.Context) error {
 	return nil
 }
 
-// truncateString truncates a string to maxLen characters.
+// truncateString truncates a string to maxLen runes (not bytes).
+// This ensures proper UTF-8 handling and won't split multi-byte characters.
 func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // getSidecarClient returns a sidecar MessageClient for the connector.
 func (c *ClaudeConnector) getSidecarClient() claudeapi.MessageClient {
 	return sidecar.NewMessageClient(
-		SidecarURL,
-		time.Duration(SidecarTimeout)*time.Second,
+		c.Config.Sidecar.GetURL(),
+		time.Duration(c.Config.Sidecar.GetTimeout())*time.Second,
 		c.Log,
 	)
 }
@@ -156,6 +160,8 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Int, "conversation_max_age_hours")
 	helper.Copy(configupgrade.Int, "rate_limit_per_minute")
 	helper.Copy(configupgrade.Bool, "sidecar", "enabled")
+	helper.Copy(configupgrade.Str, "sidecar", "url")
+	helper.Copy(configupgrade.Int, "sidecar", "timeout")
 }
 
 // ValidateConfig validates the loaded configuration.
@@ -214,6 +220,10 @@ func (c *ClaudeConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
 	metadata, ok := login.Metadata.(*UserLoginMetadata)
 	if !ok || metadata == nil {
+		c.Log.Error().
+			Bool("type_assertion_ok", ok).
+			Interface("metadata_type", fmt.Sprintf("%T", login.Metadata)).
+			Msg("Failed to cast user login metadata to expected type")
 		return fmt.Errorf("invalid user login metadata")
 	}
 
@@ -226,8 +236,8 @@ func (c *ClaudeConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		// Sidecar login with Pro/Max credentials
 		log.Info().Msg("Using sidecar backend for Pro/Max subscription")
 		messageClient = sidecar.NewMessageClient(
-			SidecarURL,
-			time.Duration(SidecarTimeout)*time.Second,
+			c.Config.Sidecar.GetURL(),
+			time.Duration(c.Config.Sidecar.GetTimeout())*time.Second,
 			log,
 		)
 	} else if metadata.APIKey != "" {
@@ -321,17 +331,6 @@ func (c *ClaudeConnector) MakeClaudeGhostID(model string) networkid.UserID {
 				Str("default_model", defaultModel).
 				Msg("Could not determine model family, defaulting to sonnet")
 		}
-	}
-	return networkid.UserID(family)
-}
-
-// MakeClaudeGhostIDStatic creates a network user ID from a model name (static version).
-// Prefer the method version when ClaudeConnector is available for proper fallback handling.
-func MakeClaudeGhostID(model string) networkid.UserID {
-	family := claudeapi.GetModelFamily(model)
-	if family == "" {
-		// Without config access, default to sonnet
-		family = "sonnet"
 	}
 	return networkid.UserID(family)
 }

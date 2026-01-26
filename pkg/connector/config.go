@@ -8,6 +8,10 @@ import (
 // DefaultTemperature is the default temperature when not specified.
 const DefaultTemperature = 1.0
 
+// ErrorMessagePrefix is the emoji/prefix used for error messages sent to Matrix rooms.
+// This provides visual distinction for error notices.
+const ErrorMessagePrefix = "⚠️ "
+
 // Input validation limits to prevent abuse and excessive API costs.
 const (
 	// MaxMessageLength is the maximum allowed message length in characters.
@@ -55,15 +59,37 @@ type SidecarConfig struct {
 	// Enabled enables the sidecar backend instead of direct API
 	// When enabled, uses Pro/Max subscription via Agent SDK instead of API credits
 	Enabled bool `yaml:"enabled"`
+
+	// URL is the sidecar service URL (default: http://localhost:8090)
+	URL string `yaml:"url"`
+
+	// Timeout is the request timeout in seconds (default: 300)
+	Timeout int `yaml:"timeout"`
 }
 
-// Internal sidecar constants (not user-configurable)
+// Default sidecar configuration values.
 const (
-	// SidecarURL is the internal URL for the sidecar service
-	SidecarURL = "http://localhost:8090"
-	// SidecarTimeout is the default timeout for sidecar requests in seconds
-	SidecarTimeout = 300
+	// DefaultSidecarURL is the default URL for the sidecar service.
+	DefaultSidecarURL = "http://localhost:8090"
+	// DefaultSidecarTimeout is the default timeout for sidecar requests in seconds.
+	DefaultSidecarTimeout = 300
 )
+
+// GetURL returns the sidecar URL, using the default if not set.
+func (c *SidecarConfig) GetURL() string {
+	if c.URL == "" {
+		return DefaultSidecarURL
+	}
+	return c.URL
+}
+
+// GetTimeout returns the sidecar timeout in seconds, using the default if not set.
+func (c *SidecarConfig) GetTimeout() int {
+	if c.Timeout <= 0 {
+		return DefaultSidecarTimeout
+	}
+	return c.Timeout
+}
 
 // ExampleConfig is the example configuration for the connector.
 // Note: Do NOT add section headers here - framework adds "network:" wrapper automatically.
@@ -98,6 +124,10 @@ rate_limit_per_minute: 60
 # This allows using Pro/Max subscriptions instead of API credits
 sidecar:
     enabled: false
+    # URL of the sidecar service (default: http://localhost:8090)
+    url: "http://localhost:8090"
+    # Request timeout in seconds (default: 300)
+    timeout: 300
 `
 
 // Validate validates the configuration.

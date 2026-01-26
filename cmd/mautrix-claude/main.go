@@ -37,5 +37,6 @@ func postInit() {
 	// Set the QueryHandler on the appservice to handle ghost user queries
 	m.Matrix.AS.QueryHandler = &connector.GhostQueryHandler{
 		Matrix: m.Matrix,
+		Log:    m.Log.With().Str("component", "query_handler").Logger(),
 	}
 }

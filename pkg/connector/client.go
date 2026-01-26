@@ -281,8 +281,36 @@ func (c *ClaudeClient) IsLoggedIn() bool {
 }
 
 // LogoutRemote logs out from the remote service.
+// For API key logins: no remote cleanup needed (key remains valid until revoked at console.anthropic.com).
+// For sidecar logins: cleans up stored Claude Code credentials on the sidecar.
 func (c *ClaudeClient) LogoutRemote(ctx context.Context) {
-	// API keys don't need remote logout
+	log := c.Connector.Log.With().
+		Str("user", string(c.UserLogin.UserMXID)).
+		Str("login_id", string(c.UserLogin.ID)).
+		Logger()
+
+	// Check if this is a sidecar login
+	meta, ok := c.UserLogin.Metadata.(*UserLoginMetadata)
+	if !ok || meta == nil {
+		return
+	}
+
+	// For sidecar logins, clean up stored credentials
+	if meta.CredentialsJSON != "" && c.Connector.Config.Sidecar.Enabled {
+		sidecarClient := sidecar.NewClient(
+			c.Connector.Config.Sidecar.GetURL(),
+			time.Duration(c.Connector.Config.Sidecar.GetTimeout())*time.Second,
+			c.Connector.Log,
+		)
+
+		// Use the Matrix user ID as the user identifier (same as used during login)
+		userID := string(c.UserLogin.UserMXID)
+		if err := sidecarClient.DeleteUser(ctx, userID); err != nil {
+			log.Warn().Err(err).Msg("Failed to clean up sidecar credentials during logout")
+		} else {
+			log.Info().Msg("Cleaned up sidecar credentials")
+		}
+	}
 }
 
 // getAPIKey returns the API key from the user login metadata.
@@ -393,6 +421,10 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		c.Connector.Log.Warn().
 			Dur("wait_time", waitTime).
 			Msg("Rate limited, rejecting message")
+		// Record rate limit rejection in metrics
+		if metrics := c.GetMetrics(); metrics != nil {
+			metrics.RecordLocalRateLimitReject()
+		}
 		errMsg := fmt.Sprintf("Rate limit exceeded. Please wait %s before sending another message.", waitTime.Round(time.Second))
 		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
 		return nil, fmt.Errorf("%s", errMsg)
@@ -706,7 +738,7 @@ func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Por
 						Type: event.EventMessage,
 						Content: &event.MessageEventContent{
 							MsgType: event.MsgNotice,
-							Body:    "⚠️ " + errorMsg,
+							Body:    ErrorMessagePrefix + errorMsg,
 						},
 					},
 				},

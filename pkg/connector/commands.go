@@ -278,7 +278,9 @@ func (c *ClaudeConnector) cmdModels(ce *commands.Event) {
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("**%s:**\n", strings.Title(family)))
+		// Capitalize first letter (strings.Title is deprecated in Go 1.18+)
+		capitalizedFamily := strings.ToUpper(family[:1]) + family[1:]
+		sb.WriteString(fmt.Sprintf("**%s:**\n", capitalizedFamily))
 		for _, model := range familyModels {
 			isDefault := ""
 			if model.ID == defaultModel {

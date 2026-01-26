@@ -32,13 +32,43 @@ func TestSidecarConfigEnabled(t *testing.T) {
 }
 
 func TestSidecarConstants(t *testing.T) {
-	if SidecarURL != "http://localhost:8090" {
-		t.Errorf("SidecarURL = %s, want http://localhost:8090", SidecarURL)
+	if DefaultSidecarURL != "http://localhost:8090" {
+		t.Errorf("DefaultSidecarURL = %s, want http://localhost:8090", DefaultSidecarURL)
 	}
 
-	if SidecarTimeout != 300 {
-		t.Errorf("SidecarTimeout = %d, want 300", SidecarTimeout)
+	if DefaultSidecarTimeout != 300 {
+		t.Errorf("DefaultSidecarTimeout = %d, want 300", DefaultSidecarTimeout)
 	}
+}
+
+func TestSidecarConfigGetters(t *testing.T) {
+	t.Run("URL defaults when empty", func(t *testing.T) {
+		config := SidecarConfig{Enabled: true}
+		if config.GetURL() != DefaultSidecarURL {
+			t.Errorf("GetURL() = %s, want %s", config.GetURL(), DefaultSidecarURL)
+		}
+	})
+
+	t.Run("URL returns custom value when set", func(t *testing.T) {
+		config := SidecarConfig{Enabled: true, URL: "http://custom:9090"}
+		if config.GetURL() != "http://custom:9090" {
+			t.Errorf("GetURL() = %s, want http://custom:9090", config.GetURL())
+		}
+	})
+
+	t.Run("Timeout defaults when zero", func(t *testing.T) {
+		config := SidecarConfig{Enabled: true}
+		if config.GetTimeout() != DefaultSidecarTimeout {
+			t.Errorf("GetTimeout() = %d, want %d", config.GetTimeout(), DefaultSidecarTimeout)
+		}
+	})
+
+	t.Run("Timeout returns custom value when set", func(t *testing.T) {
+		config := SidecarConfig{Enabled: true, Timeout: 600}
+		if config.GetTimeout() != 600 {
+			t.Errorf("GetTimeout() = %d, want 600", config.GetTimeout())
+		}
+	})
 }
 
 func TestConfigValidate(t *testing.T) {
