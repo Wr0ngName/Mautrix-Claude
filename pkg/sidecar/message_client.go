@@ -202,6 +202,7 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 }
 
 // Validate checks if the sidecar is healthy and authenticated.
+// Note: This checks GLOBAL authentication. For per-user auth, use GetHealth() instead.
 func (m *MessageClient) Validate(ctx context.Context) error {
 	health, err := m.client.Health(ctx)
 	if err != nil {
@@ -215,6 +216,25 @@ func (m *MessageClient) Validate(ctx context.Context) error {
 		return fmt.Errorf("sidecar not ready: %s", msg)
 	}
 	m.log.Info().Int("sessions", health.Sessions).Bool("authenticated", health.Authenticated).Msg("Sidecar is healthy")
+	return nil
+}
+
+// GetHealth returns the sidecar health status without requiring global authentication.
+// Use this when you want to check if sidecar is running but will provide per-user credentials.
+func (m *MessageClient) GetHealth(ctx context.Context) (*HealthResponse, error) {
+	return m.client.Health(ctx)
+}
+
+// TestAuth tests user credentials by making a minimal Claude API call via the sidecar.
+// Returns nil error if credentials are valid.
+func (m *MessageClient) TestAuth(ctx context.Context, userID, credentialsJSON string) error {
+	resp, err := m.client.TestAuth(ctx, userID, credentialsJSON)
+	if err != nil {
+		return fmt.Errorf("failed to test credentials: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("%s", resp.Message)
+	}
 	return nil
 }
 

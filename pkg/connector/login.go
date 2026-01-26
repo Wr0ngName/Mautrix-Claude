@@ -13,6 +13,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
+	"go.mau.fi/mautrix-claude/pkg/sidecar"
 )
 
 // APIKeyLogin handles API key-based login.
@@ -176,14 +177,19 @@ func (s *SidecarLogin) SubmitUserInput(ctx context.Context, input map[string]str
 		}
 	}
 
-	// TODO: Store credentials per-user and have sidecar use them
-	// For now, sidecar uses global credentials from /data/.claude/
-	// This is a limitation - all users share the same subscription
-
-	// Verify sidecar is healthy and authenticated
+	// Verify sidecar is running
 	client := s.Connector.getSidecarClient()
-	if err := client.Validate(ctx); err != nil {
-		return nil, fmt.Errorf("cannot use Pro/Max mode: %w", err)
+	sidecarClient, ok := client.(*sidecar.MessageClient)
+	if !ok {
+		return nil, fmt.Errorf("sidecar client not available")
+	}
+	if _, err := sidecarClient.GetHealth(ctx); err != nil {
+		return nil, fmt.Errorf("sidecar not available: %w", err)
+	}
+
+	// Test the user's credentials by making a real API call
+	if err := sidecarClient.TestAuth(ctx, string(s.User.MXID), credentialsJSON); err != nil {
+		return nil, fmt.Errorf("credentials validation failed: %w", err)
 	}
 
 	// Generate a unique login ID for this user

@@ -397,6 +397,89 @@ async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+class TestAuthRequest(BaseModel):
+    """Request body for auth test endpoint."""
+    user_id: str
+    credentials_json: str
+
+
+class TestAuthResponse(BaseModel):
+    """Response body for auth test endpoint."""
+    success: bool
+    message: str
+
+
+@app.post("/v1/auth/test", response_model=TestAuthResponse)
+async def test_auth(request: TestAuthRequest):
+    """
+    Test user credentials by making a minimal Claude API call.
+
+    This validates that the provided credentials are valid and can
+    communicate with Claude before completing the login flow.
+    """
+    if not request.user_id or not request.credentials_json:
+        raise HTTPException(status_code=400, detail="user_id and credentials_json required")
+
+    # Validate credentials JSON format
+    try:
+        creds = json.loads(request.credentials_json)
+        if "claudeAiOauth" not in creds and "access_token" not in creds:
+            return TestAuthResponse(
+                success=False,
+                message="Invalid credentials format: missing authentication data"
+            )
+    except json.JSONDecodeError as e:
+        return TestAuthResponse(success=False, message=f"Invalid JSON: {e}")
+
+    # SECURITY: Use global lock when manipulating CLAUDE_CONFIG_DIR
+    async with _env_lock:
+        config_dir = None
+        original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+
+        try:
+            # Set up user credentials
+            config_dir = await credentials_manager.setup_credentials(
+                request.user_id, request.credentials_json
+            )
+            os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+            logger.info(f"Testing credentials for user {request.user_id[:20]}...")
+
+            # Make a minimal test query
+            options = ClaudeAgentOptions(
+                allowed_tools=[],  # No tools for test
+                permission_mode="bypassPermissions",
+                model="haiku",  # Use cheapest/fastest model for test
+                max_turns=1,
+            )
+
+            # Simple test prompt
+            got_response = False
+            async for message in query(prompt="Say 'OK'", options=options):
+                if hasattr(message, 'result'):
+                    got_response = True
+                    break
+
+            if got_response:
+                logger.info(f"Credentials validated successfully for user {request.user_id[:20]}...")
+                return TestAuthResponse(success=True, message="Credentials validated successfully")
+            else:
+                logger.warning(f"Credentials test failed for user {request.user_id[:20]}... - no response")
+                return TestAuthResponse(success=False, message="Authentication failed - no response from Claude")
+
+        except Exception as e:
+            logger.error(f"Credentials test failed for user {request.user_id[:20]}...: {e}")
+            error_msg = str(e)
+            if "authentication" in error_msg.lower() or "unauthorized" in error_msg.lower():
+                return TestAuthResponse(success=False, message="Invalid or expired credentials")
+            return TestAuthResponse(success=False, message=f"Authentication failed: {error_msg}")
+        finally:
+            # Restore original CLAUDE_CONFIG_DIR
+            if original_config_dir is not None:
+                os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
+            elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
+                del os.environ["CLAUDE_CONFIG_DIR"]
+
+
 @app.post("/v1/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """

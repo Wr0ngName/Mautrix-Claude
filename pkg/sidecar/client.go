@@ -83,6 +83,18 @@ type HealthResponse struct {
 	Message       *string `json:"message"`       // Error message if not authenticated
 }
 
+// TestAuthRequest is the request body for testing user credentials.
+type TestAuthRequest struct {
+	UserID          string `json:"user_id"`
+	CredentialsJSON string `json:"credentials_json"`
+}
+
+// TestAuthResponse is the response from the auth test endpoint.
+type TestAuthResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 // NewClient creates a new sidecar client with the specified timeout.
 func NewClient(baseURL string, timeout time.Duration, log zerolog.Logger) *Client {
 	if timeout <= 0 {
@@ -187,6 +199,43 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	}
 
 	return &health, nil
+}
+
+// TestAuth tests user credentials by making a minimal Claude API call.
+func (c *Client) TestAuth(ctx context.Context, userID, credentialsJSON string) (*TestAuthResponse, error) {
+	reqBody := TestAuthRequest{
+		UserID:          userID,
+		CredentialsJSON: credentialsJSON,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/auth/test", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("auth test failed: %s - %s", resp.Status, string(body))
+	}
+
+	var authResp TestAuthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &authResp, nil
 }
 
 // Chat sends a message to Claude and returns the response.
