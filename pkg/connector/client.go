@@ -35,6 +35,17 @@ func isImageSupported(mimeType string) bool {
 	return supportedImageTypes[mimeType]
 }
 
+// getMessageText extracts the message text from a Matrix message content.
+// If FormattedBody (HTML) is available, it parses it to preserve mention display names.
+// Otherwise, it falls back to the plain Body (which contains raw Matrix user IDs).
+func getMessageText(content *event.MessageEventContent) string {
+	// If we have formatted HTML body, parse it to get display names for mentions
+	if content.FormattedBody != "" && content.Format == event.FormatHTML {
+		return format.HTMLToText(content.FormattedBody)
+	}
+	return content.Body
+}
+
 // downloadAndEncodeImage downloads an image from Matrix and converts it to base64.
 func (c *ClaudeClient) downloadAndEncodeImage(ctx context.Context, content *event.MessageEventContent) (*claudeapi.Content, error) {
 	// Get the content URI
@@ -458,9 +469,11 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 		// Add caption/body text if present (with sender name)
 		if msg.Content.Body != "" && msg.Content.Body != msg.Content.FileName {
+			// Use getMessageText to preserve display names in mentions
+			captionText := getMessageText(msg.Content)
 			messageContent = append(messageContent, claudeapi.Content{
 				Type: "text",
-				Text: fmt.Sprintf("[%s]: %s", senderName, msg.Content.Body),
+				Text: fmt.Sprintf("[%s]: %s", senderName, captionText),
 			})
 		} else {
 			// Add a default prompt for image analysis (with sender name)
@@ -479,12 +492,14 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		if msg.Content.Body == "" {
 			return nil, fmt.Errorf("empty message body")
 		}
+		// Use getMessageText to preserve display names in mentions
+		messageText := getMessageText(msg.Content)
 		// Validate message length to prevent abuse
-		if err := ValidateMessageLength(msg.Content.Body); err != nil {
+		if err := ValidateMessageLength(messageText); err != nil {
 			return nil, err
 		}
 		// Prepend sender name so Claude knows who's talking
-		textWithSender := fmt.Sprintf("[%s]: %s", senderName, msg.Content.Body)
+		textWithSender := fmt.Sprintf("[%s]: %s", senderName, messageText)
 		messageContent = append(messageContent, claudeapi.Content{
 			Type: "text",
 			Text: textWithSender,
@@ -867,8 +882,8 @@ func (c *ClaudeClient) HandleMatrixEdit(ctx context.Context, msg *bridgev2.Matri
 	// Get the original message ID being edited
 	originalMsgID := string(msg.EditTarget.ID)
 
-	// Get the new content
-	newContent := msg.Content.Body
+	// Get the new content (preserve display names in mentions)
+	newContent := getMessageText(msg.Content)
 
 	// Try to edit by the original message ID
 	if convMgr.EditMessageByID(originalMsgID, newContent) {
