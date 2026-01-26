@@ -137,26 +137,12 @@ func (c *ClaudeConnector) GetBridgeInfoVersion() (info, capabilities int) {
 
 // GetConfig returns the connector configuration.
 func (c *ClaudeConnector) GetConfig() (example string, data any, upgrader configupgrade.Upgrader) {
-	fmt.Printf("[CONFIG DEBUG] GetConfig called, returning pointer %p\n", &c.Config)
 	return ExampleConfig, &c.Config, configupgrade.SimpleUpgrader(upgradeConfig)
 }
 
-// upgradeConfig copies config values from the user's config file.
+// upgradeConfig copies config values from the user's config file to the base config.
+// This is called by the configupgrade system during config loading.
 func upgradeConfig(helper configupgrade.Helper) {
-	fmt.Printf("[CONFIG DEBUG] upgradeConfig called\n")
-
-	// Debug: try to read user values
-	if temp, ok := helper.Get(configupgrade.Float, "temperature"); ok {
-		fmt.Printf("[CONFIG DEBUG] User temperature: %s\n", temp)
-	} else {
-		fmt.Printf("[CONFIG DEBUG] User temperature NOT FOUND\n")
-	}
-	if sidecar, ok := helper.Get(configupgrade.Bool, "sidecar", "enabled"); ok {
-		fmt.Printf("[CONFIG DEBUG] User sidecar.enabled: %s\n", sidecar)
-	} else {
-		fmt.Printf("[CONFIG DEBUG] User sidecar.enabled NOT FOUND\n")
-	}
-
 	helper.Copy(configupgrade.Str, "default_model")
 	helper.Copy(configupgrade.Int, "max_tokens")
 	helper.Copy(configupgrade.Float, "temperature")
@@ -164,21 +150,10 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Int, "conversation_max_age_hours")
 	helper.Copy(configupgrade.Int, "rate_limit_per_minute")
 	helper.Copy(configupgrade.Bool, "sidecar", "enabled")
-	fmt.Printf("[CONFIG DEBUG] upgradeConfig done\n")
 }
 
 // ValidateConfig validates the loaded configuration.
-// This is called by the framework after config is loaded but before Init.
 func (c *ClaudeConnector) ValidateConfig() error {
-	// Log config values to debug loading issues
-	fmt.Printf("[CONFIG DEBUG] ValidateConfig called, Config at %p\n", &c.Config)
-	fmt.Printf("[CONFIG DEBUG] DefaultModel: %q\n", c.Config.DefaultModel)
-	fmt.Printf("[CONFIG DEBUG] Temperature ptr: %v\n", c.Config.Temperature)
-	if c.Config.Temperature != nil {
-		fmt.Printf("[CONFIG DEBUG] Temperature value: %f\n", *c.Config.Temperature)
-	}
-	fmt.Printf("[CONFIG DEBUG] SystemPrompt: %q\n", c.Config.SystemPrompt)
-	fmt.Printf("[CONFIG DEBUG] Sidecar.Enabled: %v\n", c.Config.Sidecar.Enabled)
 	return c.Config.Validate()
 }
 

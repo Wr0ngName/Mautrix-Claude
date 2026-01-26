@@ -74,4 +74,5 @@ else
 fi
 
 # Run the bridge
-exec gosu $UID:$GID /usr/bin/mautrix-claude -c /data/config.yaml
+# --no-update prevents config file from being overwritten on each startup
+exec gosu $UID:$GID /usr/bin/mautrix-claude -c /data/config.yaml --no-update
