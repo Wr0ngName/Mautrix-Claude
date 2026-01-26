@@ -59,8 +59,9 @@ func TestMessageClientValidate(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				json.NewEncoder(w).Encode(HealthResponse{
-					Status:   "healthy",
-					Sessions: 0,
+					Status:        "healthy",
+					Sessions:      0,
+					Authenticated: true,
 				})
 			},
 			wantErr: false,

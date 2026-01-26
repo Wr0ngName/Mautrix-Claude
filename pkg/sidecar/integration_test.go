@@ -27,8 +27,9 @@ func TestIntegrationMessageClientToSidecar(t *testing.T) {
 		case "/health":
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(HealthResponse{
-				Status:   "healthy",
-				Sessions: 0,
+				Status:        "healthy",
+				Sessions:      0,
+				Authenticated: true,
 			})
 		case "/v1/chat":
 			if r.Method != "POST" {
