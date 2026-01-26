@@ -146,24 +146,26 @@ func (c *ClaudeConnector) SetMaxFileSize(maxSize int64) {
 
 // GetLoginFlows returns the available login flows.
 func (c *ClaudeConnector) GetLoginFlows() []bridgev2.LoginFlow {
-	if c.Config.Sidecar.Enabled {
-		// Sidecar mode: authentication is handled by mounted ~/.claude credentials
-		return []bridgev2.LoginFlow{
-			{
-				Name:        "Sidecar (Pro/Max)",
-				Description: "Connect using the bridge's Claude Code authentication (no API key needed)",
-				ID:          "sidecar",
-			},
-		}
-	}
-	// API mode: user needs their own API key
-	return []bridgev2.LoginFlow{
+	flows := []bridgev2.LoginFlow{
 		{
 			Name:        "API Key",
-			Description: "Log in with your Claude API key from console.anthropic.com",
+			Description: "Log in with your own Claude API key from console.anthropic.com",
 			ID:          "api_key",
 		},
 	}
+
+	// Add sidecar option when enabled
+	if c.Config.Sidecar.Enabled {
+		flows = append([]bridgev2.LoginFlow{
+			{
+				Name:        "Pro/Max Subscription",
+				Description: "Use the bridge's shared Claude Pro/Max subscription (no API key needed)",
+				ID:          "sidecar",
+			},
+		}, flows...)
+	}
+
+	return flows
 }
 
 // CreateLogin creates a new login handler.
