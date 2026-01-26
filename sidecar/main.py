@@ -370,11 +370,16 @@ async def validate_claude_auth() -> bool:
             max_turns=1,  # Single turn only
         )
 
-        # Simple test query
+        # Simple test query - MUST consume all messages to avoid cancel scope errors
+        got_result = False
         async for message in query(prompt="Say 'OK' and nothing else.", options=options):
             if hasattr(message, 'result'):
-                logger.info("Claude Code authentication validated successfully")
-                return True
+                got_result = True
+                # Don't break/return - let the generator complete naturally
+
+        if got_result:
+            logger.info("Claude Code authentication validated successfully")
+            return True
 
         logger.warning("Auth validation: no result received")
         return False
