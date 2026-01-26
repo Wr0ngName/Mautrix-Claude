@@ -155,8 +155,8 @@ class ChatRequest(BaseModel):
                 status_code=400,
                 detail=f"Invalid portal_id: must be 1-{MAX_PORTAL_ID_LENGTH} characters"
             )
-        # Basic portal_id format check (alphanumeric, underscore, dash, colon allowed)
-        if not all(c.isalnum() or c in '_-:!' for c in self.portal_id):
+        # Basic portal_id format check (alphanumeric and common ID chars allowed)
+        if not all(c.isalnum() or c in '_-:!.' for c in self.portal_id):
             raise HTTPException(
                 status_code=400,
                 detail="Invalid portal_id: contains invalid characters"
