@@ -48,11 +48,13 @@ type Client struct {
 
 // ChatRequest is the request body for the chat endpoint.
 type ChatRequest struct {
-	PortalID     string  `json:"portal_id"`
-	Message      string  `json:"message"`
-	SystemPrompt *string `json:"system_prompt,omitempty"`
-	Model        *string `json:"model,omitempty"`
-	Stream       bool    `json:"stream"`
+	PortalID        string  `json:"portal_id"`
+	UserID          string  `json:"user_id,omitempty"`          // Matrix user ID for per-user sessions
+	CredentialsJSON string  `json:"credentials_json,omitempty"` // User's Claude credentials for Pro/Max
+	Message         string  `json:"message"`
+	SystemPrompt    *string `json:"system_prompt,omitempty"`
+	Model           *string `json:"model,omitempty"`
+	Stream          bool    `json:"stream"`
 }
 
 // ChatResponse is the response body from the chat endpoint.
@@ -187,18 +189,20 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 
 // Chat sends a message to Claude and returns the response.
 // Includes retry logic with exponential backoff and circuit breaker protection.
-func (c *Client) Chat(ctx context.Context, portalID, message string, systemPrompt, model *string) (*ChatResponse, error) {
+func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, message string, systemPrompt, model *string) (*ChatResponse, error) {
 	// Check circuit breaker
 	if !c.checkCircuit() {
 		return nil, fmt.Errorf("circuit breaker open: sidecar temporarily unavailable")
 	}
 
 	reqBody := ChatRequest{
-		PortalID:     portalID,
-		Message:      message,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		Stream:       false,
+		PortalID:        portalID,
+		UserID:          userID,
+		CredentialsJSON: credentialsJSON,
+		Message:         message,
+		SystemPrompt:    systemPrompt,
+		Model:           model,
+		Stream:          false,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)

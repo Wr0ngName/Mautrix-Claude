@@ -518,6 +518,11 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	// Send to Claude API (add portal ID context for sidecar session isolation)
 	ctx = sidecar.WithPortalID(ctx, string(msg.Portal.PortalKey.ID))
+
+	// Add user credentials for per-user sidecar sessions
+	if metadata, ok := c.UserLogin.Metadata.(*UserLoginMetadata); ok && metadata.CredentialsJSON != "" {
+		ctx = sidecar.WithUserCredentials(ctx, string(c.UserLogin.UserMXID), metadata.CredentialsJSON)
+	}
 	stream, err := c.MessageClient.CreateMessageStream(ctx, req)
 	if err != nil {
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")

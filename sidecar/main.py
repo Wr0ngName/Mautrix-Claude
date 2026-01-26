@@ -6,12 +6,17 @@ Provides HTTP API for Go bridge to communicate with Claude using Pro/Max subscri
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -109,6 +114,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     await session_manager.stop()
+    await credentials_manager.cleanup_all()
     logger.info("Claude sidecar stopped")
 
 
@@ -134,6 +140,8 @@ class Session:
 class ChatRequest(BaseModel):
     """Request body for chat endpoint."""
     portal_id: str
+    user_id: Optional[str] = None  # Matrix user ID for per-user sessions
+    credentials_json: Optional[str] = None  # User's Claude credentials JSON
     message: str
     system_prompt: Optional[str] = None
     model: Optional[str] = None
@@ -265,6 +273,75 @@ class SessionManager:
 session_manager = SessionManager()
 
 
+class CredentialsManager:
+    """
+    Manages per-user Claude credentials.
+
+    Creates temporary directories with user credentials and provides
+    the config directory path to use for Claude SDK queries.
+    """
+
+    def __init__(self, base_dir: Optional[str] = None):
+        """Initialize credentials manager with base temp directory."""
+        self._base_dir = Path(base_dir) if base_dir else Path(tempfile.gettempdir()) / "claude-creds"
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = asyncio.Lock()
+        logger.info(f"Credentials manager initialized at {self._base_dir}")
+
+    def _get_user_dir(self, user_id: str) -> Path:
+        """Get the credentials directory for a user (hashed for privacy)."""
+        # Hash user ID to avoid path issues with special chars in Matrix IDs
+        user_hash = hashlib.sha256(user_id.encode()).hexdigest()[:16]
+        return self._base_dir / user_hash
+
+    async def setup_credentials(self, user_id: str, credentials_json: str) -> str:
+        """
+        Set up credentials for a user and return the config directory path.
+
+        Args:
+            user_id: Matrix user ID
+            credentials_json: JSON string of Claude credentials
+
+        Returns:
+            Path to the config directory to use for CLAUDE_CONFIG_DIR
+        """
+        async with self._lock:
+            user_dir = self._get_user_dir(user_id)
+            user_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write credentials file
+            creds_file = user_dir / ".credentials.json"
+            try:
+                # Validate JSON before writing
+                creds_data = json.loads(credentials_json)
+                creds_file.write_text(json.dumps(creds_data, indent=2))
+                logger.debug(f"Set up credentials for user {user_id[:20]}...")
+                return str(user_dir)
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid credentials JSON for user {user_id}: {e}")
+                raise ValueError(f"Invalid credentials JSON: {e}")
+
+    async def cleanup_user(self, user_id: str) -> None:
+        """Remove credentials for a user."""
+        async with self._lock:
+            user_dir = self._get_user_dir(user_id)
+            if user_dir.exists():
+                shutil.rmtree(user_dir, ignore_errors=True)
+                logger.debug(f"Cleaned up credentials for user {user_id[:20]}...")
+
+    async def cleanup_all(self) -> None:
+        """Remove all cached credentials."""
+        async with self._lock:
+            if self._base_dir.exists():
+                shutil.rmtree(self._base_dir, ignore_errors=True)
+                self._base_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Cleaned up all cached credentials")
+
+
+# Global credentials manager
+credentials_manager = CredentialsManager()
+
+
 async def validate_claude_auth() -> bool:
     """Validate that Claude Code is authenticated by making a test query."""
     try:
@@ -312,13 +389,28 @@ async def chat(request: ChatRequest):
     Send a message to Claude and get a response.
 
     Maintains conversation context per portal_id.
+    Supports per-user credentials via user_id and credentials_json.
     """
     start_time = time.time()
 
     # Validate input before processing
     request.validate_input()
 
+    # Set up per-user credentials if provided
+    config_dir = None
+    original_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+
     try:
+        if request.user_id and request.credentials_json:
+            try:
+                config_dir = await credentials_manager.setup_credentials(
+                    request.user_id, request.credentials_json
+                )
+                os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+                logger.debug(f"Using per-user credentials from {config_dir}")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         # Get or create session for this portal
         session = await session_manager.get_or_create(request.portal_id)
 
@@ -383,6 +475,12 @@ async def chat(request: ChatRequest):
         logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
         REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
         raise HTTPException(status_code=500, detail="Internal error processing request")
+    finally:
+        # Restore original CLAUDE_CONFIG_DIR
+        if original_config_dir is not None:
+            os.environ["CLAUDE_CONFIG_DIR"] = original_config_dir
+        elif config_dir is not None and "CLAUDE_CONFIG_DIR" in os.environ:
+            del os.environ["CLAUDE_CONFIG_DIR"]
 
 
 @app.post("/v1/chat/stream")

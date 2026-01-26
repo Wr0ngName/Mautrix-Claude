@@ -49,6 +49,15 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			portalID = pid
 		}
 
+		// Extract user credentials from context
+		var userID, credentialsJSON string
+		if uid, ok := ctx.Value(userIDKey).(string); ok {
+			userID = uid
+		}
+		if creds, ok := ctx.Value(credentialsJSONKey).(string); ok {
+			credentialsJSON = creds
+		}
+
 		// Extract message text from request
 		messageText := extractMessageText(req.Messages)
 		if messageText == "" {
@@ -83,7 +92,7 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			model = &req.Model
 		}
 
-		resp, err := m.client.Chat(ctx, portalID, messageText, systemPrompt, model)
+		resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, systemPrompt, model)
 		if err != nil {
 			m.metrics.FailedRequests.Add(1)
 			events <- claudeapi.StreamEvent{
@@ -144,6 +153,15 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 		portalID = pid
 	}
 
+	// Extract user credentials from context
+	var userID, credentialsJSON string
+	if uid, ok := ctx.Value(userIDKey).(string); ok {
+		userID = uid
+	}
+	if creds, ok := ctx.Value(credentialsJSONKey).(string); ok {
+		credentialsJSON = creds
+	}
+
 	// Extract message text
 	messageText := extractMessageText(req.Messages)
 	if messageText == "" {
@@ -161,7 +179,7 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 		model = &req.Model
 	}
 
-	resp, err := m.client.Chat(ctx, portalID, messageText, systemPrompt, model)
+	resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, systemPrompt, model)
 	if err != nil {
 		m.metrics.FailedRequests.Add(1)
 		return nil, err
@@ -216,14 +234,25 @@ func (m *MessageClient) GetSessionStats(ctx context.Context, portalID string) (*
 	return m.client.GetSession(ctx, portalID)
 }
 
-// Context key for portal ID
+// Context key for portal ID and user credentials
 type contextKey string
 
-const portalIDKey contextKey = "portal_id"
+const (
+	portalIDKey        contextKey = "portal_id"
+	userIDKey          contextKey = "user_id"
+	credentialsJSONKey contextKey = "credentials_json"
+)
 
 // WithPortalID returns a context with the portal ID set.
 func WithPortalID(ctx context.Context, portalID string) context.Context {
 	return context.WithValue(ctx, portalIDKey, portalID)
+}
+
+// WithUserCredentials returns a context with user ID and credentials JSON set.
+func WithUserCredentials(ctx context.Context, userID, credentialsJSON string) context.Context {
+	ctx = context.WithValue(ctx, userIDKey, userID)
+	ctx = context.WithValue(ctx, credentialsJSONKey, credentialsJSON)
+	return ctx
 }
 
 // extractMessageText extracts the text content from the last user message.
