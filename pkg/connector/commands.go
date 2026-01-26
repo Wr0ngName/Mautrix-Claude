@@ -8,6 +8,7 @@ import (
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/event"
 )
 
@@ -285,11 +286,21 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 			}
 		}
 
-		// Have the old ghost leave by sending membership state event
+		// Have the old ghost leave the room
 		oldGhost, err := c.br.GetExistingGhostByID(ctx, oldGhostID)
 		if err == nil && oldGhost != nil {
-			leaveContent := &event.Content{Parsed: &event.MemberEventContent{Membership: event.MembershipLeave}}
-			_, _ = oldGhost.Intent.SendState(ctx, ce.Portal.MXID, event.StateMember, oldGhost.Intent.GetMXID().String(), leaveContent, time.Now())
+			// Use the underlying appservice IntentAPI's LeaveRoom method
+			if asIntent, ok := oldGhost.Intent.(*matrix.ASIntent); ok {
+				if _, err := asIntent.Matrix.LeaveRoom(ctx, ce.Portal.MXID); err != nil {
+					c.Log.Warn().Err(err).Msg("Failed to leave old ghost from room")
+				}
+			} else {
+				// Fallback to SendState approach
+				leaveContent := &event.Content{Parsed: &event.MemberEventContent{Membership: event.MembershipLeave}}
+				if _, err := oldGhost.Intent.SendState(ctx, ce.Portal.MXID, event.StateMember, oldGhost.Intent.GetMXID().String(), leaveContent, time.Time{}); err != nil {
+					c.Log.Warn().Err(err).Msg("Failed to send leave state for old ghost")
+				}
+			}
 		}
 
 		c.Log.Info().
