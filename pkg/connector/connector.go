@@ -143,6 +143,7 @@ func (c *ClaudeConnector) GetConfig() (example string, data any, upgrader config
 
 // upgradeConfig copies config values from the user's config file.
 func upgradeConfig(helper configupgrade.Helper) {
+	fmt.Printf("[CONFIG DEBUG] upgradeConfig called\n")
 	helper.Copy(configupgrade.Str, "default_model")
 	helper.Copy(configupgrade.Int, "max_tokens")
 	helper.Copy(configupgrade.Float, "temperature")
@@ -150,6 +151,7 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Int, "conversation_max_age_hours")
 	helper.Copy(configupgrade.Int, "rate_limit_per_minute")
 	helper.Copy(configupgrade.Bool, "sidecar", "enabled")
+	fmt.Printf("[CONFIG DEBUG] upgradeConfig done\n")
 }
 
 // ValidateConfig validates the loaded configuration.
