@@ -61,14 +61,13 @@ type Usage struct {
 
 // StreamEvent represents an event in a streaming response.
 type StreamEvent struct {
-	Type      string                 `json:"type"` // "message_start", "content_block_delta", "message_stop", "error", etc.
-	Index     int                    `json:"index,omitempty"`
-	Delta     *ContentDelta          `json:"delta,omitempty"`
-	Message   *CreateMessageResponse `json:"message,omitempty"`
-	Model     string                 `json:"model,omitempty"`      // Actual model used (for sidecar responses)
-	SessionID string                 `json:"session_id,omitempty"` // Agent SDK session ID (for sidecar - stored in bridge DB)
-	Usage     *Usage                 `json:"usage,omitempty"`
-	Error     *StreamError           `json:"error,omitempty"` // Error details for "error" type events
+	Type    string                 `json:"type"` // "message_start", "content_block_delta", "message_stop", "error", etc.
+	Index   int                    `json:"index,omitempty"`
+	Delta   *ContentDelta          `json:"delta,omitempty"`
+	Message *CreateMessageResponse `json:"message,omitempty"`
+	Model   string                 `json:"model,omitempty"` // Actual model used (for sidecar responses)
+	Usage   *Usage                 `json:"usage,omitempty"`
+	Error   *StreamError           `json:"error,omitempty"` // Error details for "error" type events
 }
 
 // StreamError represents an error in a streaming response.

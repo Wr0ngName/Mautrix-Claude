@@ -170,7 +170,6 @@ class ChatRequest(BaseModel):
     message: str
     system_prompt: Optional[str] = None
     model: Optional[str] = None
-    session_id: Optional[str] = None  # Agent SDK session ID for resume (stored in bridge DB)
     stream: bool = False
 
     def validate_input(self) -> None:
@@ -207,7 +206,7 @@ class ChatResponse(BaseModel):
 
 
 class SessionManager:
-    """Manages conversation session stats per portal (for metrics only, session_id stored in bridge DB)."""
+    """Manages conversation sessions per portal."""
 
     def __init__(self):
         self.sessions: Dict[str, Session] = {}
@@ -736,10 +735,9 @@ async def chat(request: ChatRequest):
                 model=actual_model,
             )
 
-            # Resume session if session_id provided by bridge (stored in bridge DB)
-            if request.session_id:
-                options.resume = request.session_id
-                logger.debug(f"Resuming session {request.session_id} for portal {request.portal_id}")
+            # Resume session if not first message
+            if session.message_count > 0:
+                options.resume = session.session_id
 
             # Set system prompt
             system_prompt = request.system_prompt or SYSTEM_PROMPT
@@ -750,14 +748,12 @@ async def chat(request: ChatRequest):
             response_text = ""
             request_input_tokens = 0
             request_output_tokens = 0
-            new_session_id = request.session_id  # Default to provided session_id
 
             async for message in query(prompt=request.message, options=options):
-                # Capture session ID on init (returned to bridge for storage)
+                # Capture session ID on init
                 if hasattr(message, 'subtype') and message.subtype == 'init':
                     if hasattr(message, 'data') and 'session_id' in message.data:
-                        new_session_id = message.data['session_id']
-                        logger.debug(f"Got session_id from Agent SDK: {new_session_id}")
+                        session.session_id = message.data['session_id']
 
                 # Capture result
                 if hasattr(message, 'result'):
@@ -792,7 +788,7 @@ async def chat(request: ChatRequest):
             tokens_used = request_input_tokens + request_output_tokens
             return ChatResponse(
                 portal_id=request.portal_id,
-                session_id=new_session_id or "",  # Return session_id for bridge to store
+                session_id=session.session_id,
                 response=response_text,
                 model=actual_model,
                 tokens_used=tokens_used if tokens_used > 0 else None
