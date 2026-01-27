@@ -673,12 +673,12 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 		Strs("args", ce.Args).
 		Msg("Join command: starting")
 
-	// If already a portal, just re-configure relay
+	// If already a portal, update model and ghost, then re-configure relay
 	if ce.Portal != nil {
 		c.Log.Debug().
 			Str("portal_id", string(ce.Portal.PortalKey.ID)).
 			Str("portal_mxid", string(ce.Portal.MXID)).
-			Msg("Join command: portal already exists, updating relay only")
+			Msg("Join command: portal already exists, updating model and relay")
 
 		login := ce.User.GetDefaultLogin()
 		if login == nil {
@@ -686,18 +686,115 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 			return
 		}
 
-		if !c.br.Config.Relay.Enabled {
-			ce.Reply("Claude is already in this room. Relay mode is disabled in bridge config.\n\nUse `model` to change the model or `stats` to see conversation info.")
+		// Get existing metadata to check current model
+		portalMeta, _ := ce.Portal.Metadata.(*PortalMetadata)
+		oldModel := ""
+		if portalMeta != nil {
+			oldModel = portalMeta.Model
+		}
+
+		// Parse model from args (same logic as new portal path)
+		model := c.Config.GetDefaultModel()
+		if len(ce.Args) > 0 {
+			requestedModel := strings.ToLower(strings.Join(ce.Args, "-"))
+			switch requestedModel {
+			case "opus", "claude-opus":
+				model = "opus"
+			case "sonnet", "claude-sonnet":
+				model = "sonnet"
+			case "haiku", "claude-haiku":
+				model = "haiku"
+			default:
+				if strings.Contains(requestedModel, "claude") {
+					model = requestedModel
+				} else {
+					ce.Reply("Unknown model: %s. Use `opus`, `sonnet`, `haiku`, or a full model ID.", requestedModel)
+					return
+				}
+			}
+		}
+
+		c.Log.Debug().
+			Str("old_model", oldModel).
+			Str("new_model", model).
+			Msg("Join command: updating model in existing portal")
+
+		// Update portal metadata with new model
+		if portalMeta == nil {
+			portalMeta = &PortalMetadata{}
+		}
+		portalMeta.ConversationName = fmt.Sprintf("Claude (%s)", model)
+		portalMeta.Model = model
+		ce.Portal.Metadata = portalMeta
+
+		if err := ce.Portal.Save(ce.Ctx); err != nil {
+			ce.Reply("Failed to save portal: %v", err)
 			return
 		}
 
-		// Re-set relay to this user
-		if err := ce.Portal.SetRelay(ce.Ctx, login); err != nil {
-			ce.Reply("Failed to set relay: %v", err)
+		// Get the ghost for the new model
+		ghostID := c.MakeClaudeGhostID(model)
+		ghost, err := c.GetOrUpdateGhost(ce.Ctx, ghostID, model)
+		if err != nil {
+			ce.Reply("Failed to get Claude ghost: %v", err)
 			return
 		}
 
-		ce.Reply("✓ Relay updated! Messages from all users in this room will now be relayed through your account.\n\nUse `model` to change models, `mention on` for mention-only mode, or `unset-relay` to disable relay.")
+		// Have the new ghost join the room
+		roomID := ce.RoomID
+		err = ghost.Intent.EnsureJoined(ce.Ctx, roomID)
+		if err != nil {
+			c.Log.Warn().Err(err).
+				Str("ghost_mxid", ghost.Intent.GetMXID().String()).
+				Msg("Failed to join room with ghost, trying invite first")
+
+			// Try to invite and then join
+			botIntent := c.br.Bot
+			err = botIntent.EnsureInvited(ce.Ctx, roomID, ghost.Intent.GetMXID())
+			if err != nil {
+				ce.Reply("Failed to invite Claude to this room: %v\n\nMake sure the bot has permission to invite users.", err)
+				return
+			}
+			err = ghost.Intent.EnsureJoined(ce.Ctx, roomID)
+			if err != nil {
+				ce.Reply("Claude was invited but failed to join: %v", err)
+				return
+			}
+		}
+
+		// If model changed, leave old ghost from room
+		if oldModel != "" && oldModel != model {
+			oldGhostID := c.MakeClaudeGhostID(oldModel)
+			if oldGhostID != ghostID {
+				oldGhost, err := c.br.GetExistingGhostByID(ce.Ctx, oldGhostID)
+				if err == nil && oldGhost != nil {
+					c.Log.Debug().
+						Str("old_ghost_id", string(oldGhostID)).
+						Msg("Leaving old ghost from room")
+					// Use the underlying appservice IntentAPI's LeaveRoom method
+					if asIntent, ok := oldGhost.Intent.(*matrix.ASIntent); ok {
+						if _, err := asIntent.Matrix.LeaveRoom(ce.Ctx, roomID); err != nil {
+							c.Log.Warn().Err(err).Msg("Failed to leave old ghost from room")
+						}
+					}
+				}
+			}
+		}
+
+		// Re-set relay if enabled
+		if c.br.Config.Relay.Enabled {
+			if err := ce.Portal.SetRelay(ce.Ctx, login); err != nil {
+				ce.Reply("Failed to set relay: %v", err)
+				return
+			}
+		}
+
+		displayName := claudeapi.GetModelDisplayName(model)
+		if oldModel != "" && oldModel != model {
+			ce.Reply("✓ **%s** has joined the room! (replaced %s)\n\nUse `model` to change models, `mention on` for mention-only mode, or `clear` to reset conversation.", displayName, claudeapi.GetModelDisplayName(oldModel))
+		} else {
+			ce.Reply("✓ **%s** is in the room! Relay updated.\n\nUse `model` to change models, `mention on` for mention-only mode, or `clear` to reset conversation.", displayName)
+		}
 		return
 	}
 	c.Log.Debug().Msg("Join command: no existing portal, creating new one")
