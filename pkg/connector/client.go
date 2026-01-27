@@ -615,12 +615,21 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			return
 		}
 
+		// Log the ghost MXID for debugging
+		ghostMXID := ghostIntent.GetMXID()
+		c.Connector.Log.Debug().
+			Str("ghost_mxid", ghostMXID.String()).
+			Str("room_id", msg.Portal.MXID.String()).
+			Msg("Starting typing indicator loop for ghost")
+
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 
 		// Send initial typing indicator
 		if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
-			c.Connector.Log.Debug().Err(err).Msg("Failed to start typing indicator")
+			c.Connector.Log.Debug().Err(err).Str("ghost_mxid", ghostMXID.String()).Msg("Failed to start typing indicator")
+		} else {
+			c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Sent initial typing indicator")
 		}
 
 		for {
@@ -628,7 +637,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			case <-typingDone:
 				// Stop typing when done
 				if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0); err != nil {
-					c.Connector.Log.Debug().Err(err).Msg("Failed to stop typing indicator")
+					c.Connector.Log.Debug().Err(err).Str("ghost_mxid", ghostMXID.String()).Msg("Failed to stop typing indicator")
+				} else {
+					c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Stopped typing indicator")
 				}
 				return
 			case <-ctx.Done():
@@ -637,11 +648,14 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				_ = ghostIntent.MarkTyping(bgCtx, msg.Portal.MXID, bridgev2.TypingTypeText, 0)
 				cancel()
+				c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Stopped typing indicator (context cancelled)")
 				return
 			case <-ticker.C:
 				// Refresh typing indicator
 				if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
-					c.Connector.Log.Debug().Err(err).Msg("Failed to refresh typing indicator")
+					c.Connector.Log.Debug().Err(err).Str("ghost_mxid", ghostMXID.String()).Msg("Failed to refresh typing indicator")
+				} else {
+					c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Refreshed typing indicator")
 				}
 			}
 		}
