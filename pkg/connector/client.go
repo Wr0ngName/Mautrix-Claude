@@ -592,24 +592,6 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	// Get ghost intent for typing notification
 	ghostID := c.Connector.MakeClaudeGhostID(model)
-	ghost, err := c.Connector.GetOrUpdateGhost(ctx, ghostID, model)
-	if err != nil {
-		c.Connector.Log.Warn().Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to get ghost for typing")
-	}
-
-	// Ensure ghost is in the room before trying to send typing indicators
-	if ghost != nil {
-		if err := ghost.Intent.EnsureJoined(ctx, msg.Portal.MXID); err != nil {
-			c.Connector.Log.Debug().Err(err).Msg("Ghost not in room, trying to join for typing indicator")
-			// Try invite + join
-			if err := c.Connector.br.Bot.EnsureInvited(ctx, msg.Portal.MXID, ghost.Intent.GetMXID()); err != nil {
-				c.Connector.Log.Debug().Err(err).Msg("Failed to invite ghost for typing")
-			} else if err := ghost.Intent.EnsureJoined(ctx, msg.Portal.MXID); err != nil {
-				c.Connector.Log.Debug().Err(err).Msg("Ghost failed to join for typing")
-			}
-		}
-	}
-
 	ghostIntent := c.Connector.br.Matrix.GhostIntent(ghostID)
 
 	// Start typing indicator refresh loop
