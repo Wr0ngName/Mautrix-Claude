@@ -590,14 +590,31 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			Msg("Resuming sidecar session from bridge DB")
 	}
 
-	// Get ghost intent for typing notification
+	// Get ghost with proper intent for typing notification
+	// Using GetOrUpdateGhost ensures we get the actual ghost's intent,
+	// not a raw intent that may not be properly associated with the ghost
 	ghostID := c.Connector.MakeClaudeGhostID(model)
-	ghostIntent := c.Connector.br.Matrix.GhostIntent(ghostID)
+	ghost, err := c.Connector.GetOrUpdateGhost(ctx, ghostID, model)
+	if err != nil {
+		c.Connector.Log.Warn().Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to get ghost for typing indicator")
+		// Continue without typing indicator rather than failing the message
+	}
+	var ghostIntent bridgev2.MatrixAPI
+	if ghost != nil {
+		ghostIntent = ghost.Intent
+	}
 
 	// Start typing indicator refresh loop
 	// Matrix typing indicators expire after ~4s, so refresh every 3s
 	typingDone := make(chan struct{})
 	go func() {
+		// Skip typing indicator if we couldn't get the ghost intent
+		if ghostIntent == nil {
+			c.Connector.Log.Debug().Msg("No ghost intent available, skipping typing indicator")
+			<-typingDone // Wait for done signal
+			return
+		}
+
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 
