@@ -582,6 +582,14 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		ctx = sidecar.WithUserCredentials(ctx, string(c.UserLogin.UserMXID), metadata.CredentialsJSON)
 	}
 
+	// Add session ID for sidecar resume (stored in bridge DB portal metadata)
+	if isSidecarMode && meta.SidecarSessionID != "" {
+		ctx = sidecar.WithSessionID(ctx, meta.SidecarSessionID)
+		c.Connector.Log.Debug().
+			Str("session_id", meta.SidecarSessionID).
+			Msg("Resuming sidecar session from bridge DB")
+	}
+
 	// Get ghost intent for typing notification
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 	ghostIntent := c.Connector.br.Matrix.GhostIntent(ghostID)
@@ -651,6 +659,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	var claudeMessageID string
 	var inputTokens, outputTokens int
 	var streamError error
+	var newSessionID string // Agent SDK session ID from sidecar (for resume)
 
 	for event := range stream {
 		switch event.Type {
@@ -668,6 +677,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		case "message_delta":
 			if event.Usage != nil {
 				outputTokens = event.Usage.OutputTokens
+			}
+			if event.SessionID != "" {
+				newSessionID = event.SessionID
 			}
 		case "error":
 			c.Connector.Log.Error().Interface("event", event).Msg("Error in stream")
@@ -700,6 +712,21 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		errMsg := "received empty response from Claude"
 		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
 		return nil, errors.New(errMsg)
+	}
+
+	// Store sidecar session ID for resume (persisted in bridge DB)
+	if isSidecarMode && newSessionID != "" && newSessionID != meta.SidecarSessionID {
+		meta.SidecarSessionID = newSessionID
+		msg.Portal.Metadata = meta
+		if err := msg.Portal.Save(ctx); err != nil {
+			c.Connector.Log.Warn().Err(err).
+				Str("session_id", newSessionID).
+				Msg("Failed to save sidecar session ID to portal metadata")
+		} else {
+			c.Connector.Log.Debug().
+				Str("session_id", newSessionID).
+				Msg("Saved sidecar session ID to bridge DB for resume")
+		}
 	}
 
 	// Only track conversation history locally for API mode

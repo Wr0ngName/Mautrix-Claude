@@ -58,6 +58,12 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			credentialsJSON = creds
 		}
 
+		// Extract session ID for resume (stored in bridge DB)
+		var sessionID string
+		if sid, ok := ctx.Value(sessionIDKey).(string); ok {
+			sessionID = sid
+		}
+
 		// Extract message text from request
 		messageText := extractMessageText(req.Messages)
 		if messageText == "" {
@@ -92,7 +98,7 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			model = &req.Model
 		}
 
-		resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, systemPrompt, model)
+		resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, sessionID, systemPrompt, model)
 		if err != nil {
 			m.metrics.FailedRequests.Add(1)
 			events <- claudeapi.StreamEvent{
@@ -127,10 +133,11 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			m.metrics.TotalOutputTokens.Add(int64(*resp.TokensUsed))
 		}
 
-		// Send message_delta with usage and actual model
+		// Send message_delta with usage, actual model, and session_id for bridge to store
 		events <- claudeapi.StreamEvent{
-			Type:  "message_delta",
-			Model: actualModel, // Include actual model for ghost ID resolution
+			Type:      "message_delta",
+			Model:     actualModel,      // Include actual model for ghost ID resolution
+			SessionID: resp.SessionID,   // Return session_id for bridge to store in DB
 			Usage: &claudeapi.Usage{
 				OutputTokens: estimateTokens(resp.Response),
 			},
@@ -186,7 +193,13 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 		model = &req.Model
 	}
 
-	resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, systemPrompt, model)
+	// Extract session ID for resume (stored in bridge DB)
+	var sessionID string
+	if sid, ok := ctx.Value(sessionIDKey).(string); ok {
+		sessionID = sid
+	}
+
+	resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, sessionID, systemPrompt, model)
 	if err != nil {
 		m.metrics.FailedRequests.Add(1)
 		return nil, err
@@ -281,13 +294,14 @@ func (m *MessageClient) GetSessionStats(ctx context.Context, portalID string) (*
 	return m.client.GetSession(ctx, portalID)
 }
 
-// Context key for portal ID and user credentials
+// Context key for portal ID, user credentials, and session ID
 type contextKey string
 
 const (
 	portalIDKey        contextKey = "portal_id"
 	userIDKey          contextKey = "user_id"
 	credentialsJSONKey contextKey = "credentials_json"
+	sessionIDKey       contextKey = "session_id"
 )
 
 // WithPortalID returns a context with the portal ID set.
@@ -300,6 +314,11 @@ func WithUserCredentials(ctx context.Context, userID, credentialsJSON string) co
 	ctx = context.WithValue(ctx, userIDKey, userID)
 	ctx = context.WithValue(ctx, credentialsJSONKey, credentialsJSON)
 	return ctx
+}
+
+// WithSessionID returns a context with the Agent SDK session ID set (for resume).
+func WithSessionID(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionIDKey, sessionID)
 }
 
 // extractMessageText extracts the text content from the last user message.

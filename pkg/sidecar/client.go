@@ -80,6 +80,7 @@ type ChatRequest struct {
 	Message         string  `json:"message"`
 	SystemPrompt    *string `json:"system_prompt,omitempty"`
 	Model           *string `json:"model,omitempty"`
+	SessionID       string  `json:"session_id,omitempty"`       // Agent SDK session ID for resume (from bridge DB)
 	Stream          bool    `json:"stream"`
 }
 
@@ -369,7 +370,8 @@ func (c *Client) OAuthComplete(ctx context.Context, userID, state, code string) 
 
 // Chat sends a message to Claude and returns the response.
 // Includes retry logic with exponential backoff and circuit breaker protection.
-func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, message string, systemPrompt, model *string) (*ChatResponse, error) {
+// sessionID is the Agent SDK session ID for resuming conversations (stored in bridge DB).
+func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, message, sessionID string, systemPrompt, model *string) (*ChatResponse, error) {
 	// Check circuit breaker
 	if !c.checkCircuit() {
 		return nil, fmt.Errorf("circuit breaker open: sidecar temporarily unavailable")
@@ -382,6 +384,7 @@ func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, me
 		Message:         message,
 		SystemPrompt:    systemPrompt,
 		Model:           model,
+		SessionID:       sessionID,
 		Stream:          false,
 	}
 
