@@ -796,23 +796,38 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 		Str("ghost_mxid", ghost.Intent.GetMXID().String()).
 		Msg("Join command: got ghost intent")
 
-	// Set up portal metadata
+	// Set up portal metadata - always update the model even if portal exists
 	chatName := fmt.Sprintf("Claude (%s)", model)
-	portalMeta := &PortalMetadata{
-		ConversationName: chatName,
-		Model:            model,
+
+	// Get existing metadata or create new
+	portalMeta, _ := portal.Metadata.(*PortalMetadata)
+	if portalMeta == nil {
+		portalMeta = &PortalMetadata{}
 	}
+	portalMeta.ConversationName = chatName
+	portalMeta.Model = model
 
 	// Update the portal to use this room
+	needsSave := false
 	if portal.MXID == "" {
 		// Link the existing Matrix room to this portal
 		portal.MXID = roomID
-		portal.Metadata = portalMeta
+		needsSave = true
+	}
 
+	// Always update metadata (model may have changed)
+	portal.Metadata = portalMeta
+	needsSave = true
+
+	if needsSave {
 		if err := portal.Save(ctx); err != nil {
 			ce.Reply("Failed to save portal: %v", err)
 			return
 		}
+		c.Log.Debug().
+			Str("model", model).
+			Str("portal_id", string(portal.PortalKey.ID)).
+			Msg("Join command: saved portal metadata with model")
 	}
 
 	// Have the ghost join the room
