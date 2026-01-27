@@ -590,87 +590,25 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			Msg("Resuming sidecar session from bridge DB")
 	}
 
-	// Get ghost with proper intent for typing notification
-	// Using GetOrUpdateGhost ensures we get the actual ghost's intent,
-	// not a raw intent that may not be properly associated with the ghost
+	// Get ghost intent for typing notification
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 	ghost, err := c.Connector.GetOrUpdateGhost(ctx, ghostID, model)
 	if err != nil {
 		c.Connector.Log.Warn().Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to get ghost for typing indicator")
-		// Continue without typing indicator rather than failing the message
 	}
-	var ghostIntent bridgev2.MatrixAPI
+
+	// Send typing indicator (will be cleared when response is sent)
 	if ghost != nil {
-		ghostIntent = ghost.Intent
+		if err := ghost.Intent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
+			c.Connector.Log.Debug().Err(err).Msg("Failed to send typing indicator")
+		}
 	}
 
-	// Start typing indicator refresh loop
-	// Matrix typing indicators expire after ~4s, so refresh every 3s
-	typingDone := make(chan struct{})
-	go func() {
-		// Skip typing indicator if we couldn't get the ghost intent
-		if ghostIntent == nil {
-			c.Connector.Log.Debug().Msg("No ghost intent available, skipping typing indicator")
-			<-typingDone // Wait for done signal
-			return
-		}
-
-		// Log the ghost MXID for debugging
-		ghostMXID := ghostIntent.GetMXID()
-		c.Connector.Log.Debug().
-			Str("ghost_mxid", ghostMXID.String()).
-			Str("room_id", msg.Portal.MXID.String()).
-			Msg("Starting typing indicator loop for ghost")
-
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
-
-		// Send initial typing indicator
-		if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
-			c.Connector.Log.Debug().Err(err).Str("ghost_mxid", ghostMXID.String()).Msg("Failed to start typing indicator")
-		} else {
-			c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Sent initial typing indicator")
-		}
-
-		for {
-			select {
-			case <-typingDone:
-				// Stop typing when done
-				if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0); err != nil {
-					c.Connector.Log.Debug().Err(err).Str("ghost_mxid", ghostMXID.String()).Msg("Failed to stop typing indicator")
-				} else {
-					c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Stopped typing indicator")
-				}
-				return
-			case <-ctx.Done():
-				// Context cancelled, stop typing
-				// Use background context since original ctx is done
-				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_ = ghostIntent.MarkTyping(bgCtx, msg.Portal.MXID, bridgev2.TypingTypeText, 0)
-				cancel()
-				c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Stopped typing indicator (context cancelled)")
-				return
-			case <-ticker.C:
-				// Refresh typing indicator
-				// Synapse may not redistribute typing EDUs if the state hasn't changed,
-				// so we briefly stop typing to force a state change before starting again.
-				// This ensures clients receive the refresh notification.
-				_ = ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0)
-				if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
-					c.Connector.Log.Debug().Err(err).Str("ghost_mxid", ghostMXID.String()).Msg("Failed to refresh typing indicator")
-				} else {
-					c.Connector.Log.Debug().Str("ghost_mxid", ghostMXID.String()).Msg("Refreshed typing indicator")
-				}
-			}
-		}
-	}()
-
-	// Helper to stop typing on any exit path (safe to call multiple times)
-	var stopTypingOnce sync.Once
+	// Helper to stop typing
 	stopTyping := func() {
-		stopTypingOnce.Do(func() {
-			close(typingDone)
-		})
+		if ghost != nil {
+			_ = ghost.Intent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0)
+		}
 	}
 
 	// Create a context with timeout for the sidecar call to prevent hanging forever
