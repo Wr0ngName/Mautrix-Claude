@@ -850,7 +850,13 @@ func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Por
 	})
 }
 
+// MaxMessageSize is the maximum size for a single Matrix message in bytes.
+// Matrix events have a ~64KB limit, but with encryption overhead and HTML formatting,
+// we use a conservative limit to avoid M_TOO_LARGE errors.
+const MaxMessageSize = 30000
+
 // queueAssistantResponse sends the assistant's message to the Matrix room.
+// If the message is too large, it splits it into multiple messages.
 func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, messageID string, tokensUsed int) {
 	model := c.Connector.Config.GetDefaultModel()
 	if meta, ok := portal.Metadata.(*PortalMetadata); ok && meta != nil && meta.Model != "" {
@@ -859,36 +865,126 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 
-	c.UserLogin.QueueRemoteEvent(&simplevent.Message[*MessageMetadata]{
-		EventMeta: simplevent.EventMeta{
-			Type: bridgev2.RemoteEventMessage,
-			LogContext: func(c zerolog.Context) zerolog.Context {
-				return c.Str("claude_message_id", messageID)
-			},
-			PortalKey: portal.PortalKey,
-			Sender:    bridgev2.EventSender{Sender: ghostID},
-			Timestamp: time.Now(),
-		},
-		ID: MakeClaudeMessageID(messageID),
-		Data: &MessageMetadata{
-			ClaudeMessageID: messageID,
-			TokensUsed:      tokensUsed,
-		},
-		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
-			// Convert markdown to Matrix HTML format
-			content := format.RenderMarkdown(text, true, true)
-			content.MsgType = event.MsgText
-			return &bridgev2.ConvertedMessage{
-				Parts: []*bridgev2.ConvertedMessagePart{
-					{
-						ID:      networkid.PartID(messageID),
-						Type:    event.EventMessage,
-						Content: &content,
-					},
+	// Split message if too large
+	parts := splitMessage(text, MaxMessageSize)
+
+	for i, part := range parts {
+		partID := messageID
+		partTokens := 0
+		if len(parts) > 1 {
+			partID = fmt.Sprintf("%s_part%d", messageID, i+1)
+			// Only count tokens on first part
+			if i == 0 {
+				partTokens = tokensUsed
+			}
+		} else {
+			partTokens = tokensUsed
+		}
+
+		// Capture loop variables for closure
+		partText := part
+		partMessageID := partID
+
+		c.UserLogin.QueueRemoteEvent(&simplevent.Message[*MessageMetadata]{
+			EventMeta: simplevent.EventMeta{
+				Type: bridgev2.RemoteEventMessage,
+				LogContext: func(c zerolog.Context) zerolog.Context {
+					return c.Str("claude_message_id", partMessageID)
 				},
-			}, nil
-		},
-	})
+				PortalKey: portal.PortalKey,
+				Sender:    bridgev2.EventSender{Sender: ghostID},
+				Timestamp: time.Now(),
+			},
+			ID: MakeClaudeMessageID(partMessageID),
+			Data: &MessageMetadata{
+				ClaudeMessageID: partMessageID,
+				TokensUsed:      partTokens,
+			},
+			ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
+				// Convert markdown to Matrix HTML format
+				content := format.RenderMarkdown(partText, true, true)
+				content.MsgType = event.MsgText
+				return &bridgev2.ConvertedMessage{
+					Parts: []*bridgev2.ConvertedMessagePart{
+						{
+							ID:      networkid.PartID(partMessageID),
+							Type:    event.EventMessage,
+							Content: &content,
+						},
+					},
+				}, nil
+			},
+		})
+	}
+
+	if len(parts) > 1 {
+		c.Connector.Log.Info().
+			Int("parts", len(parts)).
+			Int("total_size", len(text)).
+			Msg("Split large Claude response into multiple messages")
+	}
+}
+
+// splitMessage splits a message into chunks that fit within the size limit.
+// It tries to split on paragraph boundaries, then sentence boundaries, then word boundaries.
+func splitMessage(text string, maxSize int) []string {
+	if len(text) <= maxSize {
+		return []string{text}
+	}
+
+	var parts []string
+	remaining := text
+
+	for len(remaining) > 0 {
+		if len(remaining) <= maxSize {
+			parts = append(parts, remaining)
+			break
+		}
+
+		// Find a good split point
+		splitPoint := findSplitPoint(remaining, maxSize)
+		parts = append(parts, strings.TrimSpace(remaining[:splitPoint]))
+		remaining = strings.TrimSpace(remaining[splitPoint:])
+	}
+
+	return parts
+}
+
+// findSplitPoint finds a good point to split the text, preferring paragraph, sentence, or word boundaries.
+func findSplitPoint(text string, maxSize int) int {
+	// Try to find a paragraph break (double newline)
+	for i := maxSize; i > maxSize/2; i-- {
+		if i < len(text) && text[i] == '\n' && i > 0 && text[i-1] == '\n' {
+			return i
+		}
+	}
+
+	// Try to find a single newline
+	for i := maxSize; i > maxSize/2; i-- {
+		if i < len(text) && text[i] == '\n' {
+			return i + 1
+		}
+	}
+
+	// Try to find a sentence boundary (. ! ?)
+	for i := maxSize; i > maxSize/2; i-- {
+		if i < len(text) {
+			ch := text[i-1]
+			if (ch == '.' || ch == '!' || ch == '?') && (i >= len(text) || text[i] == ' ' || text[i] == '\n') {
+				return i
+			}
+		}
+	}
+
+	// Try to find a word boundary (space)
+	for i := maxSize; i > maxSize/2; i-- {
+		if i < len(text) && text[i] == ' ' {
+			return i + 1
+		}
+	}
+
+	// Last resort: hard cut at maxSize
+	return maxSize
 }
 
 // GetCapabilities returns the capabilities for a specific portal.
