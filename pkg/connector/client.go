@@ -588,6 +588,14 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	clientType := c.MessageClient.GetClientType()
 	typingStartTime := time.Now()
 
+	// Ensure ghost is joined to room before setting typing (required for typing to persist)
+	if err := ghostIntent.EnsureJoined(ctx, msg.Portal.MXID); err != nil {
+		c.Connector.Log.Warn().Err(err).
+			Str("mode", clientType).
+			Str("ghost_id", string(ghostID)).
+			Msg("TYPING_DEBUG: Failed to ensure ghost joined room")
+	}
+
 	// Start typing indicator before processing
 	// Use a long timeout (5 minutes) since Claude can take a while to respond
 	c.Connector.Log.Info().
