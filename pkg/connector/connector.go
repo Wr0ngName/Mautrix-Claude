@@ -277,10 +277,11 @@ type MessageMetadata struct {
 // PortalMetadata contains Claude-specific portal/room metadata.
 type PortalMetadata struct {
 	ConversationName string   `json:"conversation_name"`
-	Model            string   `json:"model"`                   // Selected model for this room
-	SystemPrompt     string   `json:"system_prompt,omitempty"` // Custom system prompt
-	Temperature      *float64 `json:"temperature,omitempty"`   // Custom temperature
-	MentionOnly      bool     `json:"mention_only,omitempty"`  // Only respond when mentioned
+	Model            string   `json:"model"`                        // Selected model for this room
+	SystemPrompt     string   `json:"system_prompt,omitempty"`      // Custom system prompt
+	Temperature      *float64 `json:"temperature,omitempty"`        // Custom temperature
+	MentionOnly      bool     `json:"mention_only,omitempty"`       // Only respond when mentioned
+	SidecarSessionID string   `json:"sidecar_session_id,omitempty"` // Agent SDK session ID for resume
 }
 
 // GetTemperature returns the temperature for this portal, or the default if not set.
