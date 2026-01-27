@@ -590,6 +590,13 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			Msg("Resuming sidecar session from bridge DB")
 	}
 
+	// Create a context with timeout for the sidecar call to prevent hanging forever
+	// Use sidecar timeout config (defaults to 5 minutes)
+	streamTimeout := time.Duration(c.Connector.Config.Sidecar.GetTimeout()) * time.Second
+	if streamTimeout <= 0 {
+		streamTimeout = 5 * time.Minute
+	}
+
 	// Get ghost intent for typing notification
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 	ghost, err := c.Connector.GetOrUpdateGhost(ctx, ghostID, model)
@@ -597,9 +604,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		c.Connector.Log.Warn().Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to get ghost for typing indicator")
 	}
 
-	// Send typing indicator (will be cleared when response is sent)
+	// Send typing indicator with timeout matching sidecar timeout
 	if ghost != nil {
-		if err := ghost.Intent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
+		if err := ghost.Intent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, streamTimeout); err != nil {
 			c.Connector.Log.Debug().Err(err).Msg("Failed to send typing indicator")
 		}
 	}
@@ -609,13 +616,6 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		if ghost != nil {
 			_ = ghost.Intent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0)
 		}
-	}
-
-	// Create a context with timeout for the sidecar call to prevent hanging forever
-	// Use sidecar timeout config (defaults to 5 minutes)
-	streamTimeout := time.Duration(c.Connector.Config.Sidecar.GetTimeout()) * time.Second
-	if streamTimeout <= 0 {
-		streamTimeout = 5 * time.Minute
 	}
 	streamCtx, streamCancel := context.WithTimeout(ctx, streamTimeout)
 	defer streamCancel()
