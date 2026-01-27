@@ -652,6 +652,10 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 				return
 			case <-ticker.C:
 				// Refresh typing indicator
+				// Synapse may not redistribute typing EDUs if the state hasn't changed,
+				// so we briefly stop typing to force a state change before starting again.
+				// This ensures clients receive the refresh notification.
+				_ = ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0)
 				if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
 					c.Connector.Log.Debug().Err(err).Str("ghost_mxid", ghostMXID.String()).Msg("Failed to refresh typing indicator")
 				} else {
