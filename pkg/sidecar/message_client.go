@@ -72,7 +72,17 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			return
 		}
 
-		// Call sidecar FIRST (this blocks until Claude responds)
+		// Send message_start event
+		events <- claudeapi.StreamEvent{
+			Type: "message_start",
+			Message: &claudeapi.CreateMessageResponse{
+				ID:    fmt.Sprintf("sidecar_%d", time.Now().UnixNano()),
+				Model: req.Model,
+				Usage: &claudeapi.Usage{},
+			},
+		}
+
+		// Call sidecar
 		var systemPrompt *string
 		if req.System != "" {
 			systemPrompt = &req.System
@@ -99,17 +109,6 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 		actualModel := resp.Model
 		if actualModel == "" {
 			actualModel = req.Model // Fallback to request model if response is empty
-		}
-
-		// Now send all events at once (after Chat() completes)
-		// Send message_start event first
-		events <- claudeapi.StreamEvent{
-			Type: "message_start",
-			Message: &claudeapi.CreateMessageResponse{
-				ID:    fmt.Sprintf("sidecar_%d", time.Now().UnixNano()),
-				Model: actualModel,
-				Usage: &claudeapi.Usage{},
-			},
 		}
 
 		// Send content as a single block

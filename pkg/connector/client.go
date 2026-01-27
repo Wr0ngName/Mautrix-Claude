@@ -588,27 +588,56 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	clientType := c.MessageClient.GetClientType()
 	typingStartTime := time.Now()
 
+	// Ensure ghost is joined to room before setting typing (required for typing to persist)
+	if err := ghostIntent.EnsureJoined(ctx, msg.Portal.MXID); err != nil {
+		c.Connector.Log.Warn().Err(err).
+			Str("mode", clientType).
+			Str("ghost_id", string(ghostID)).
+			Msg("TYPING_DEBUG: Failed to ensure ghost joined room")
+	}
+
 	// Start typing indicator before processing
 	// Use a long timeout (5 minutes) since Claude can take a while to respond
+	c.Connector.Log.Info().
+		Str("mode", clientType).
+		Str("ghost_id", string(ghostID)).
+		Str("room_id", string(msg.Portal.MXID)).
+		Msg("TYPING_DEBUG: Starting typing indicator")
+
 	if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 5*time.Minute); err != nil {
-		c.Connector.Log.Warn().Err(err).Str("mode", clientType).Msg("Failed to start typing indicator")
+		c.Connector.Log.Warn().Err(err).Str("mode", clientType).Msg("TYPING_DEBUG: MarkTyping START failed")
+	} else {
+		c.Connector.Log.Info().Str("mode", clientType).Msg("TYPING_DEBUG: MarkTyping START success")
 	}
 
 	// Helper to stop typing on any exit path
 	stopTyping := func() {
 		elapsed := time.Since(typingStartTime)
-		c.Connector.Log.Debug().
+		c.Connector.Log.Info().
 			Str("mode", clientType).
 			Dur("typing_duration", elapsed).
-			Msg("Stopping typing indicator")
+			Msg("TYPING_DEBUG: Stopping typing indicator")
 
 		if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0); err != nil {
-			c.Connector.Log.Warn().Err(err).Str("mode", clientType).Msg("MarkTyping STOP failed")
+			c.Connector.Log.Warn().Err(err).Str("mode", clientType).Msg("TYPING_DEBUG: MarkTyping STOP failed")
+		} else {
+			c.Connector.Log.Info().Str("mode", clientType).Msg("TYPING_DEBUG: MarkTyping STOP success")
 		}
 	}
 
+	c.Connector.Log.Info().Str("mode", clientType).Msg("TYPING_DEBUG: Calling CreateMessageStream")
+
 	stream, err := c.MessageClient.CreateMessageStream(ctx, req)
+
+	c.Connector.Log.Info().
+		Str("mode", clientType).
+		Bool("error", err != nil).
+		Bool("stream_nil", stream == nil).
+		Dur("elapsed", time.Since(typingStartTime)).
+		Msg("TYPING_DEBUG: CreateMessageStream returned")
+
 	if err != nil {
+		c.Connector.Log.Info().Str("mode", clientType).Msg("TYPING_DEBUG: Stopping due to CreateMessageStream error")
 		stopTyping()
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")
 		friendlyErr := c.formatUserFriendlyError(err)
@@ -616,6 +645,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		return nil, friendlyErr
 	}
 	if stream == nil {
+		c.Connector.Log.Info().Str("mode", clientType).Msg("TYPING_DEBUG: Stopping due to nil stream")
 		stopTyping()
 		errMsg := "received nil stream from Claude API"
 		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
@@ -628,7 +658,20 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	var inputTokens, outputTokens int
 	var streamError error
 
+	c.Connector.Log.Info().
+		Str("mode", clientType).
+		Dur("elapsed", time.Since(typingStartTime)).
+		Msg("TYPING_DEBUG: Entering stream event loop")
+
+	eventCount := 0
 	for event := range stream {
+		eventCount++
+		c.Connector.Log.Info().
+			Str("mode", clientType).
+			Str("event_type", event.Type).
+			Int("event_count", eventCount).
+			Dur("elapsed", time.Since(typingStartTime)).
+			Msg("TYPING_DEBUG: Received stream event")
 
 		switch event.Type {
 		case "message_start":
@@ -655,6 +698,12 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			}
 		}
 	}
+
+	c.Connector.Log.Info().
+		Str("mode", clientType).
+		Int("total_events", eventCount).
+		Dur("elapsed", time.Since(typingStartTime)).
+		Msg("TYPING_DEBUG: Stream loop completed, stopping typing")
 
 	// Stop typing indicator now that streaming is complete
 	stopTyping()
