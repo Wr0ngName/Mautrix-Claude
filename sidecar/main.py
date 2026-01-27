@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 PORT = int(os.getenv("CLAUDE_SIDECAR_PORT", "8090"))
+QUERY_TIMEOUT = int(os.getenv("CLAUDE_SIDECAR_QUERY_TIMEOUT", "300"))  # 5 minutes default
 
 # SECURITY: Whitelist of safe tools that are allowed in multi-user chat
 # NEVER add file access, bash, or code editing tools here
@@ -680,6 +681,51 @@ async def test_auth(request: TestAuthRequest):
                 del os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
 
+async def _run_query_with_timeout(
+    prompt: str,
+    options: ClaudeAgentOptions,
+    timeout_seconds: int,
+    portal_id: str,
+) -> tuple[str, str, int, int]:
+    """
+    Run a query with timeout protection.
+
+    Returns (response_text, session_id, input_tokens, output_tokens).
+    Raises TimeoutError if the query takes too long.
+    """
+    response_text = ""
+    new_session_id = ""
+    request_input_tokens = 0
+    request_output_tokens = 0
+
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            async for message in query(prompt=prompt, options=options):
+                # Capture session ID on init (returned to bridge for storage)
+                if hasattr(message, 'subtype') and message.subtype == 'init':
+                    if hasattr(message, 'data') and 'session_id' in message.data:
+                        new_session_id = message.data['session_id']
+                        logger.debug(f"Got session_id from Agent SDK: {new_session_id}")
+
+                # Capture result
+                if hasattr(message, 'result'):
+                    response_text = message.result
+
+                # Capture token usage if available
+                if hasattr(message, 'usage'):
+                    if hasattr(message.usage, 'input_tokens'):
+                        request_input_tokens += message.usage.input_tokens
+                        TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
+                    if hasattr(message.usage, 'output_tokens'):
+                        request_output_tokens += message.usage.output_tokens
+                        TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+    except asyncio.TimeoutError:
+        logger.error(f"Query timed out after {timeout_seconds}s for portal {portal_id}")
+        raise
+
+    return response_text, new_session_id, request_input_tokens, request_output_tokens
+
+
 @app.post("/v1/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
@@ -737,40 +783,49 @@ async def chat(request: ChatRequest):
             )
 
             # Resume session if session_id provided by bridge (stored in bridge DB)
-            if request.session_id:
-                options.resume = request.session_id
-                logger.debug(f"Resuming session {request.session_id} for portal {request.portal_id}")
+            session_id_to_use = request.session_id
+            if session_id_to_use:
+                options.resume = session_id_to_use
+                logger.debug(f"Resuming session {session_id_to_use} for portal {request.portal_id}")
 
             # Set system prompt
             system_prompt = request.system_prompt or SYSTEM_PROMPT
             if system_prompt:
                 options.system_prompt = system_prompt
 
-            # Query Claude
+            # Query Claude with timeout
+            # If resume fails/times out, retry without session_id
             response_text = ""
             request_input_tokens = 0
             request_output_tokens = 0
-            new_session_id = request.session_id  # Default to provided session_id
+            new_session_id = session_id_to_use or ""
 
-            async for message in query(prompt=request.message, options=options):
-                # Capture session ID on init (returned to bridge for storage)
-                if hasattr(message, 'subtype') and message.subtype == 'init':
-                    if hasattr(message, 'data') and 'session_id' in message.data:
-                        new_session_id = message.data['session_id']
-                        logger.debug(f"Got session_id from Agent SDK: {new_session_id}")
-
-                # Capture result
-                if hasattr(message, 'result'):
-                    response_text = message.result
-
-                # Capture token usage if available
-                if hasattr(message, 'usage'):
-                    if hasattr(message.usage, 'input_tokens'):
-                        request_input_tokens += message.usage.input_tokens
-                        TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
-                    if hasattr(message.usage, 'output_tokens'):
-                        request_output_tokens += message.usage.output_tokens
-                        TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+            try:
+                response_text, new_session_id, request_input_tokens, request_output_tokens = \
+                    await _run_query_with_timeout(
+                        prompt=request.message,
+                        options=options,
+                        timeout_seconds=QUERY_TIMEOUT,
+                        portal_id=request.portal_id,
+                    )
+            except asyncio.TimeoutError:
+                # If we were trying to resume a session and it timed out, retry without resume
+                if session_id_to_use:
+                    logger.warning(f"Session resume timed out for {request.portal_id}, retrying without session_id")
+                    options.resume = None
+                    response_text, new_session_id, request_input_tokens, request_output_tokens = \
+                        await _run_query_with_timeout(
+                            prompt=request.message,
+                            options=options,
+                            timeout_seconds=QUERY_TIMEOUT,
+                            portal_id=request.portal_id,
+                        )
+                else:
+                    # No session to retry without, propagate the timeout
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"Request timed out after {QUERY_TIMEOUT}s"
+                    )
 
             # Estimate tokens if Agent SDK didn't provide them (~4 chars per token)
             if request_input_tokens == 0 and request.message:
@@ -801,6 +856,11 @@ async def chat(request: ChatRequest):
         except HTTPException:
             # Re-raise HTTP exceptions (validation errors, etc.)
             raise
+        except asyncio.TimeoutError:
+            # Timeout without session retry (already tried)
+            logger.error(f"Query timed out for portal {request.portal_id}")
+            REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
+            raise HTTPException(status_code=504, detail=f"Request timed out after {QUERY_TIMEOUT}s")
         except Exception as e:
             # Log full error but don't expose details to client (security)
             logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
@@ -870,7 +930,12 @@ async def chat_stream(request: ChatRequest):
                     model=actual_model,
                 )
 
-                if session.message_count > 0:
+                # Use session_id from request (bridge DB) if provided, otherwise fall back to local session
+                session_id_to_use = request.session_id
+                if session_id_to_use:
+                    options.resume = session_id_to_use
+                    logger.debug(f"Resuming session {session_id_to_use} for portal {request.portal_id} (stream)")
+                elif session.message_count > 0:
                     options.resume = session.session_id
 
                 system_prompt = request.system_prompt or SYSTEM_PROMPT
@@ -880,34 +945,75 @@ async def chat_stream(request: ChatRequest):
                 request_input_tokens = 0
                 request_output_tokens = 0
                 response_text = ""
+                timed_out = False
 
-                async for message in query(prompt=request.message, options=options):
-                    # Capture session ID
-                    if hasattr(message, 'subtype') and message.subtype == 'init':
-                        if hasattr(message, 'data') and 'session_id' in message.data:
-                            session.session_id = message.data['session_id']
-                            yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model})}\n\n"
+                try:
+                    async with asyncio.timeout(QUERY_TIMEOUT):
+                        async for message in query(prompt=request.message, options=options):
+                            # Capture session ID
+                            if hasattr(message, 'subtype') and message.subtype == 'init':
+                                if hasattr(message, 'data') and 'session_id' in message.data:
+                                    session.session_id = message.data['session_id']
+                                    yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model})}\n\n"
 
-                    # Stream assistant messages
-                    if hasattr(message, 'type') and message.type == 'assistant':
-                        if hasattr(message, 'message') and message.message:
-                            for block in message.message.content:
-                                if hasattr(block, 'text'):
-                                    yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
+                            # Stream assistant messages
+                            if hasattr(message, 'type') and message.type == 'assistant':
+                                if hasattr(message, 'message') and message.message:
+                                    for block in message.message.content:
+                                        if hasattr(block, 'text'):
+                                            yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
 
-                    # Stream final result
-                    if hasattr(message, 'result'):
-                        response_text = message.result
-                        yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
+                            # Stream final result
+                            if hasattr(message, 'result'):
+                                response_text = message.result
+                                yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
 
-                    # Capture token usage if available
-                    if hasattr(message, 'usage'):
-                        if hasattr(message.usage, 'input_tokens'):
-                            request_input_tokens += message.usage.input_tokens
-                            TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
-                        if hasattr(message.usage, 'output_tokens'):
-                            request_output_tokens += message.usage.output_tokens
-                            TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+                            # Capture token usage if available
+                            if hasattr(message, 'usage'):
+                                if hasattr(message.usage, 'input_tokens'):
+                                    request_input_tokens += message.usage.input_tokens
+                                    TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
+                                if hasattr(message.usage, 'output_tokens'):
+                                    request_output_tokens += message.usage.output_tokens
+                                    TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    logger.error(f"Stream query timed out after {QUERY_TIMEOUT}s for portal {request.portal_id}")
+
+                    # If we were resuming a session and it timed out, retry without session
+                    if session_id_to_use or (session.message_count > 0):
+                        logger.warning(f"Retrying without session resume for {request.portal_id}")
+                        options.resume = None
+                        try:
+                            async with asyncio.timeout(QUERY_TIMEOUT):
+                                async for message in query(prompt=request.message, options=options):
+                                    if hasattr(message, 'subtype') and message.subtype == 'init':
+                                        if hasattr(message, 'data') and 'session_id' in message.data:
+                                            session.session_id = message.data['session_id']
+                                            yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model})}\n\n"
+                                    if hasattr(message, 'type') and message.type == 'assistant':
+                                        if hasattr(message, 'message') and message.message:
+                                            for block in message.message.content:
+                                                if hasattr(block, 'text'):
+                                                    yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
+                                    if hasattr(message, 'result'):
+                                        response_text = message.result
+                                        yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
+                                    if hasattr(message, 'usage'):
+                                        if hasattr(message.usage, 'input_tokens'):
+                                            request_input_tokens += message.usage.input_tokens
+                                            TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
+                                        if hasattr(message.usage, 'output_tokens'):
+                                            request_output_tokens += message.usage.output_tokens
+                                            TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+                            timed_out = False  # Retry succeeded
+                        except asyncio.TimeoutError:
+                            logger.error(f"Stream query retry also timed out for portal {request.portal_id}")
+                            yield f"data: {json.dumps({'type': 'error', 'message': f'Request timed out after {QUERY_TIMEOUT}s'})}\n\n"
+                            return
+                    else:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'Request timed out after {QUERY_TIMEOUT}s'})}\n\n"
+                        return
 
                 # Estimate tokens if Agent SDK didn't provide them (~4 chars per token)
                 if request_input_tokens == 0 and request.message:
