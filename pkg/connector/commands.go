@@ -668,8 +668,18 @@ func (c *ClaudeConnector) cmdMention(ce *commands.Event) {
 // cmdJoin adds Claude to the current room by creating a bridge portal.
 // If Claude is already in the room, this re-configures the relay.
 func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
+	c.Log.Debug().
+		Bool("portal_exists", ce.Portal != nil).
+		Strs("args", ce.Args).
+		Msg("Join command: starting")
+
 	// If already a portal, just re-configure relay
 	if ce.Portal != nil {
+		c.Log.Debug().
+			Str("portal_id", string(ce.Portal.PortalKey.ID)).
+			Str("portal_mxid", string(ce.Portal.MXID)).
+			Msg("Join command: portal already exists, updating relay only")
+
 		login := ce.User.GetDefaultLogin()
 		if login == nil {
 			ce.Reply("You are not logged in.")
@@ -690,6 +700,7 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 		ce.Reply("✓ Relay updated! Messages from all users in this room will now be relayed through your account.\n\nUse `model` to change models, `mention on` for mention-only mode, or `unset-relay` to disable relay.")
 		return
 	}
+	c.Log.Debug().Msg("Join command: no existing portal, creating new one")
 
 	login := ce.User.GetDefaultLogin()
 	if login == nil {
@@ -705,8 +716,17 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 
 	// Determine model to use
 	model := c.Config.GetDefaultModel()
+	c.Log.Debug().
+		Strs("args", ce.Args).
+		Str("default_model", model).
+		Msg("Join command: parsing model from args")
+
 	if len(ce.Args) > 0 {
 		requestedModel := strings.ToLower(strings.Join(ce.Args, "-"))
+		c.Log.Debug().
+			Str("requested_model", requestedModel).
+			Msg("Join command: processing requested model")
+
 		switch requestedModel {
 		case "opus", "claude-opus":
 			model = "opus"
@@ -723,6 +743,9 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 				return
 			}
 		}
+		c.Log.Debug().
+			Str("resolved_model", model).
+			Msg("Join command: resolved model")
 	}
 
 	// Get the room ID from the event
@@ -758,11 +781,20 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 
 	// Get the ghost for this model (with proper metadata)
 	ghostID := c.MakeClaudeGhostID(model)
+	c.Log.Debug().
+		Str("model", model).
+		Str("ghost_id", string(ghostID)).
+		Msg("Join command: resolved ghost ID from model")
+
 	ghost, err := c.GetOrUpdateGhost(ctx, ghostID, model)
 	if err != nil {
 		ce.Reply("Failed to get Claude ghost: %v", err)
 		return
 	}
+
+	c.Log.Debug().
+		Str("ghost_mxid", ghost.Intent.GetMXID().String()).
+		Msg("Join command: got ghost intent")
 
 	// Set up portal metadata
 	chatName := fmt.Sprintf("Claude (%s)", model)
@@ -784,24 +816,42 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 	}
 
 	// Have the ghost join the room
+	c.Log.Debug().
+		Str("ghost_mxid", ghost.Intent.GetMXID().String()).
+		Str("room_id", string(roomID)).
+		Msg("Join command: attempting to have ghost join room")
+
 	err = ghost.Intent.EnsureJoined(ctx, roomID)
 	if err != nil {
-		c.Log.Warn().Err(err).Msg("Failed to join room with ghost, trying invite first")
+		c.Log.Warn().Err(err).
+			Str("ghost_mxid", ghost.Intent.GetMXID().String()).
+			Str("room_id", string(roomID)).
+			Msg("Failed to join room with ghost, trying invite first")
 
 		// Try to invite and then join
 		botIntent := c.br.Bot
+		c.Log.Debug().
+			Str("ghost_mxid", ghost.Intent.GetMXID().String()).
+			Msg("Join command: attempting to invite ghost via bot")
+
 		err = botIntent.EnsureInvited(ctx, roomID, ghost.Intent.GetMXID())
 		if err != nil {
+			c.Log.Error().Err(err).
+				Str("ghost_mxid", ghost.Intent.GetMXID().String()).
+				Msg("Join command: failed to invite ghost")
 			ce.Reply("Failed to invite Claude to this room: %v\n\nMake sure the bot has permission to invite users.", err)
 			return
 		}
 
+		c.Log.Debug().Msg("Join command: invite succeeded, attempting join")
 		err = ghost.Intent.EnsureJoined(ctx, roomID)
 		if err != nil {
+			c.Log.Error().Err(err).Msg("Join command: ghost failed to join after invite")
 			ce.Reply("Claude was invited but failed to join: %v", err)
 			return
 		}
 	}
+	c.Log.Debug().Msg("Join command: ghost successfully joined room")
 
 	// Auto-set relay so other users in the room can also talk to Claude
 	// This uses the joining user's login to relay messages from non-logged-in users
