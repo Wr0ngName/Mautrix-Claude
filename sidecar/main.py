@@ -158,6 +158,8 @@ class Session:
     created_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
     message_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class ChatRequest(BaseModel):
@@ -288,7 +290,9 @@ class SessionManager:
                     "created_at": session.created_at,
                     "last_used": session.last_used,
                     "message_count": session.message_count,
-                    "age_seconds": time.time() - session.created_at
+                    "age_seconds": time.time() - session.created_at,
+                    "input_tokens": session.input_tokens,
+                    "output_tokens": session.output_tokens,
                 }
             return None
 
@@ -742,7 +746,8 @@ async def chat(request: ChatRequest):
 
             # Query Claude
             response_text = ""
-            tokens_used = 0
+            request_input_tokens = 0
+            request_output_tokens = 0
 
             async for message in query(prompt=request.message, options=options):
                 # Capture session ID on init
@@ -757,19 +762,30 @@ async def chat(request: ChatRequest):
                 # Capture token usage if available
                 if hasattr(message, 'usage'):
                     if hasattr(message.usage, 'input_tokens'):
-                        tokens_used += message.usage.input_tokens
+                        request_input_tokens += message.usage.input_tokens
                         TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
                     if hasattr(message.usage, 'output_tokens'):
-                        tokens_used += message.usage.output_tokens
+                        request_output_tokens += message.usage.output_tokens
                         TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+
+            # Estimate tokens if Agent SDK didn't provide them (~4 chars per token)
+            if request_input_tokens == 0 and request.message:
+                request_input_tokens = max(1, len(request.message) // 4)
+                TOKENS_USED.labels(type='input').inc(request_input_tokens)
+            if request_output_tokens == 0 and response_text:
+                request_output_tokens = max(1, len(response_text) // 4)
+                TOKENS_USED.labels(type='output').inc(request_output_tokens)
 
             # Update session
             session.message_count += 1
             session.last_used = time.time()
+            session.input_tokens += request_input_tokens
+            session.output_tokens += request_output_tokens
 
             REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='success').inc()
             REQUEST_DURATION.observe(time.time() - start_time)
 
+            tokens_used = request_input_tokens + request_output_tokens
             return ChatResponse(
                 portal_id=request.portal_id,
                 session_id=session.session_id,
@@ -857,6 +873,10 @@ async def chat_stream(request: ChatRequest):
                 if system_prompt:
                     options.system_prompt = system_prompt
 
+                request_input_tokens = 0
+                request_output_tokens = 0
+                response_text = ""
+
                 async for message in query(prompt=request.message, options=options):
                     # Capture session ID
                     if hasattr(message, 'subtype') and message.subtype == 'init':
@@ -873,10 +893,30 @@ async def chat_stream(request: ChatRequest):
 
                     # Stream final result
                     if hasattr(message, 'result'):
+                        response_text = message.result
                         yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
+
+                    # Capture token usage if available
+                    if hasattr(message, 'usage'):
+                        if hasattr(message.usage, 'input_tokens'):
+                            request_input_tokens += message.usage.input_tokens
+                            TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
+                        if hasattr(message.usage, 'output_tokens'):
+                            request_output_tokens += message.usage.output_tokens
+                            TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+
+                # Estimate tokens if Agent SDK didn't provide them (~4 chars per token)
+                if request_input_tokens == 0 and request.message:
+                    request_input_tokens = max(1, len(request.message) // 4)
+                    TOKENS_USED.labels(type='input').inc(request_input_tokens)
+                if request_output_tokens == 0 and response_text:
+                    request_output_tokens = max(1, len(response_text) // 4)
+                    TOKENS_USED.labels(type='output').inc(request_output_tokens)
 
                 session.message_count += 1
                 session.last_used = time.time()
+                session.input_tokens += request_input_tokens
+                session.output_tokens += request_output_tokens
 
                 yield "data: {\"type\": \"done\"}\n\n"
 

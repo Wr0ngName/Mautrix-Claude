@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
+	"go.mau.fi/mautrix-claude/pkg/sidecar"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/event"
@@ -459,9 +460,7 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 	}
 
 	meta, _ := ce.Portal.Metadata.(*PortalMetadata)
-
-	// Get conversation stats
-	msgCount, estimatedTokens, lastUsed := client.GetConversationStats(ce.Portal.PortalKey.ID)
+	isSidecarMode := client.MessageClient.GetClientType() == "sidecar"
 
 	var sb strings.Builder
 	sb.WriteString("**Conversation Statistics:**\n\n")
@@ -479,9 +478,42 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 		sb.WriteString(fmt.Sprintf("**Model:** `%s`\n", model))
 	}
 
+	// Get stats - different sources for sidecar vs API mode
+	var msgCount int
+	var inputTokens, outputTokens int64
+	var lastUsed time.Time
+
+	if isSidecarMode {
+		// Get stats from sidecar
+		if sidecarClient, ok := client.MessageClient.(*sidecar.MessageClient); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if stats, err := sidecarClient.GetSessionStats(ctx, string(ce.Portal.PortalKey.ID)); err == nil && stats != nil {
+				msgCount = stats.MessageCount
+				inputTokens = stats.InputTokens
+				outputTokens = stats.OutputTokens
+				if stats.LastUsed > 0 {
+					lastUsed = time.Unix(int64(stats.LastUsed), 0)
+				}
+			}
+		}
+	} else {
+		// Get local conversation stats for API mode
+		var estimatedTokens int
+		msgCount, estimatedTokens, lastUsed = client.GetConversationStats(ce.Portal.PortalKey.ID)
+		// API mode uses estimated tokens (no actual input/output breakdown from local tracking)
+		outputTokens = int64(estimatedTokens)
+	}
+
 	// Conversation stats
 	sb.WriteString(fmt.Sprintf("**Messages in context:** %d\n", msgCount))
-	sb.WriteString(fmt.Sprintf("**Estimated tokens:** ~%d\n", estimatedTokens))
+	if isSidecarMode {
+		// Sidecar provides actual token counts from Agent SDK
+		sb.WriteString(fmt.Sprintf("**Tokens used:** %d (in: %d, out: %d)\n",
+			inputTokens+outputTokens, inputTokens, outputTokens))
+	} else {
+		sb.WriteString(fmt.Sprintf("**Estimated tokens:** ~%d\n", outputTokens))
+	}
 
 	if !lastUsed.IsZero() {
 		sb.WriteString(fmt.Sprintf("**Last active:** %s ago\n", time.Since(lastUsed).Round(time.Second)))
@@ -503,17 +535,20 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 		sb.WriteString(fmt.Sprintf("**Temperature:** %.2f (default)\n", c.Config.GetTemperature()))
 	}
 
-	// API metrics
+	// API metrics (local bridge metrics)
 	if metrics := client.GetMetrics(); metrics != nil {
 		totalReqs := metrics.TotalRequests.Load()
 		failedReqs := metrics.FailedRequests.Load()
-		inputTokens := metrics.TotalInputTokens.Load()
-		outputTokens := metrics.TotalOutputTokens.Load()
+		localInputTokens := metrics.TotalInputTokens.Load()
+		localOutputTokens := metrics.TotalOutputTokens.Load()
 
 		sb.WriteString(fmt.Sprintf("\n**API Stats (this session):**\n"))
 		sb.WriteString(fmt.Sprintf("• Requests: %d (%d failed)\n", totalReqs, failedReqs))
-		sb.WriteString(fmt.Sprintf("• Total tokens: %d (in: %d, out: %d)\n",
-			inputTokens+outputTokens, inputTokens, outputTokens))
+		if !isSidecarMode {
+			// Only show token breakdown for API mode (sidecar already shows above)
+			sb.WriteString(fmt.Sprintf("• Total tokens: %d (in: %d, out: %d)\n",
+				localInputTokens+localOutputTokens, localInputTokens, localOutputTokens))
+		}
 		if avgDuration := metrics.GetAverageRequestDuration(); avgDuration > 0 {
 			sb.WriteString(fmt.Sprintf("• Avg response time: %s\n", avgDuration.Round(time.Millisecond)))
 		}

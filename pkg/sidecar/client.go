@@ -100,6 +100,8 @@ type SessionStats struct {
 	LastUsed     float64 `json:"last_used"`
 	MessageCount int     `json:"message_count"`
 	AgeSeconds   float64 `json:"age_seconds"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
 }
 
 // HealthResponse is the response from the health endpoint.
