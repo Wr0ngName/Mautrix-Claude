@@ -607,7 +607,16 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		}
 	}
 
-	stream, err := c.MessageClient.CreateMessageStream(ctx, req)
+	// Create a context with timeout for the sidecar call to prevent hanging forever
+	// Use sidecar timeout config (defaults to 5 minutes)
+	streamTimeout := time.Duration(c.Connector.Config.Sidecar.GetTimeout()) * time.Second
+	if streamTimeout <= 0 {
+		streamTimeout = 5 * time.Minute
+	}
+	streamCtx, streamCancel := context.WithTimeout(ctx, streamTimeout)
+	defer streamCancel()
+
+	stream, err := c.MessageClient.CreateMessageStream(streamCtx, req)
 	if err != nil {
 		stopTyping()
 		c.Connector.Log.Error().Err(err).Msg("Failed to create message stream")
@@ -661,6 +670,18 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	// Stop typing indicator now that streaming is complete
 	stopTyping()
+
+	// Check if context timed out
+	if streamCtx.Err() == context.DeadlineExceeded {
+		errMsg := fmt.Sprintf("Request timed out after %s. The sidecar may be overloaded or unresponsive.", streamTimeout)
+		c.Connector.Log.Error().Dur("timeout", streamTimeout).Msg("Sidecar request timed out")
+		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+		return nil, errors.New(errMsg)
+	} else if streamCtx.Err() == context.Canceled {
+		errMsg := "Request was cancelled"
+		c.Connector.Log.Warn().Msg("Sidecar request was cancelled")
+		return nil, errors.New(errMsg)
+	}
 
 	// Check for streaming errors
 	if streamError != nil {

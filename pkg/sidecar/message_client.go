@@ -37,8 +37,23 @@ func NewMessageClient(baseURL string, timeout time.Duration, log zerolog.Logger)
 func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.CreateMessageRequest) (<-chan claudeapi.StreamEvent, error) {
 	events := make(chan claudeapi.StreamEvent, 10)
 
+	// Helper to send event with context check
+	sendEvent := func(event claudeapi.StreamEvent) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case events <- event:
+			return true
+		}
+	}
+
 	go func() {
 		defer close(events)
+
+		// Check if context is already cancelled
+		if ctx.Err() != nil {
+			return
+		}
 
 		startTime := time.Now()
 		m.metrics.TotalRequests.Add(1)
@@ -68,24 +83,26 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 		messageText := extractMessageText(req.Messages)
 		if messageText == "" {
 			m.metrics.FailedRequests.Add(1)
-			events <- claudeapi.StreamEvent{
+			sendEvent(claudeapi.StreamEvent{
 				Type: "error",
 				Error: &claudeapi.StreamError{
 					Type:    "invalid_request",
 					Message: "empty message",
 				},
-			}
+			})
 			return
 		}
 
 		// Send message_start event
-		events <- claudeapi.StreamEvent{
+		if !sendEvent(claudeapi.StreamEvent{
 			Type: "message_start",
 			Message: &claudeapi.CreateMessageResponse{
 				ID:    fmt.Sprintf("sidecar_%d", time.Now().UnixNano()),
 				Model: req.Model,
 				Usage: &claudeapi.Usage{},
 			},
+		}) {
+			return // Context cancelled
 		}
 
 		// Call sidecar
@@ -101,13 +118,24 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 		resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, sessionID, systemPrompt, model)
 		if err != nil {
 			m.metrics.FailedRequests.Add(1)
-			events <- claudeapi.StreamEvent{
+			// Check if it was a context cancellation
+			if ctx.Err() != nil {
+				sendEvent(claudeapi.StreamEvent{
+					Type: "error",
+					Error: &claudeapi.StreamError{
+						Type:    "cancelled",
+						Message: "request cancelled: " + ctx.Err().Error(),
+					},
+				})
+				return
+			}
+			sendEvent(claudeapi.StreamEvent{
 				Type: "error",
 				Error: &claudeapi.StreamError{
 					Type:    "sidecar_error",
 					Message: err.Error(),
 				},
-			}
+			})
 			return
 		}
 
@@ -118,12 +146,14 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 		}
 
 		// Send content as a single block
-		events <- claudeapi.StreamEvent{
+		if !sendEvent(claudeapi.StreamEvent{
 			Type: "content_block_delta",
 			Delta: &claudeapi.ContentDelta{
 				Type: "text_delta",
 				Text: resp.Response,
 			},
+		}) {
+			return // Context cancelled
 		}
 
 		// Track tokens if available from sidecar
@@ -134,19 +164,21 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 		}
 
 		// Send message_delta with usage, actual model, and session_id for bridge to store
-		events <- claudeapi.StreamEvent{
+		if !sendEvent(claudeapi.StreamEvent{
 			Type:      "message_delta",
 			Model:     actualModel,    // Include actual model for ghost ID resolution
 			SessionID: resp.SessionID, // Return session_id for bridge to store in DB
 			Usage: &claudeapi.Usage{
 				OutputTokens: estimateTokens(resp.Response),
 			},
+		}) {
+			return // Context cancelled
 		}
 
 		// Send message_stop
-		events <- claudeapi.StreamEvent{
+		sendEvent(claudeapi.StreamEvent{
 			Type: "message_stop",
-		}
+		})
 
 		// Record successful request
 		outputTokens := estimateTokens(resp.Response)
