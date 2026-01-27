@@ -594,17 +594,48 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 	ghostIntent := c.Connector.br.Matrix.GhostIntent(ghostID)
 
-	// Start typing indicator before processing
-	// Use a long timeout (5 minutes) since Claude can take a while to respond
-	if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 5*time.Minute); err != nil {
-		c.Connector.Log.Debug().Err(err).Msg("Failed to start typing indicator")
-	}
+	// Start typing indicator refresh loop
+	// Matrix typing indicators expire after ~4s, so refresh every 3s
+	typingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
 
-	// Helper to stop typing on any exit path
-	stopTyping := func() {
-		if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0); err != nil {
-			c.Connector.Log.Debug().Err(err).Msg("Failed to stop typing indicator")
+		// Send initial typing indicator
+		if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
+			c.Connector.Log.Debug().Err(err).Msg("Failed to start typing indicator")
 		}
+
+		for {
+			select {
+			case <-typingDone:
+				// Stop typing when done
+				if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 0); err != nil {
+					c.Connector.Log.Debug().Err(err).Msg("Failed to stop typing indicator")
+				}
+				return
+			case <-ctx.Done():
+				// Context cancelled, stop typing
+				// Use background context since original ctx is done
+				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = ghostIntent.MarkTyping(bgCtx, msg.Portal.MXID, bridgev2.TypingTypeText, 0)
+				cancel()
+				return
+			case <-ticker.C:
+				// Refresh typing indicator
+				if err := ghostIntent.MarkTyping(ctx, msg.Portal.MXID, bridgev2.TypingTypeText, 30*time.Second); err != nil {
+					c.Connector.Log.Debug().Err(err).Msg("Failed to refresh typing indicator")
+				}
+			}
+		}
+	}()
+
+	// Helper to stop typing on any exit path (safe to call multiple times)
+	var stopTypingOnce sync.Once
+	stopTyping := func() {
+		stopTypingOnce.Do(func() {
+			close(typingDone)
+		})
 	}
 
 	// Create a context with timeout for the sidecar call to prevent hanging forever
