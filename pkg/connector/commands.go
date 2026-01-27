@@ -445,8 +445,25 @@ func (c *ClaudeConnector) cmdClear(ce *commands.Event) {
 	// Get stats before clearing
 	msgCount, tokens, _ := client.GetConversationStats(ce.Portal.PortalKey.ID)
 
-	// Clear the conversation
+	// Clear the conversation (local history for API mode)
 	client.ClearConversation(ce.Portal.PortalKey.ID)
+
+	// Clear sidecar session ID from portal metadata (for sidecar mode)
+	// This ensures the next message starts a fresh Agent SDK session
+	meta, _ := ce.Portal.Metadata.(*PortalMetadata)
+	if meta != nil && meta.SidecarSessionID != "" {
+		oldSessionID := meta.SidecarSessionID
+		meta.SidecarSessionID = ""
+		ce.Portal.Metadata = meta
+		if err := ce.Portal.Save(ce.Ctx); err != nil {
+			c.Log.Warn().Err(err).Msg("Failed to clear sidecar session ID from portal metadata")
+		} else {
+			c.Log.Debug().
+				Str("old_session_id", oldSessionID).
+				Str("portal_id", string(ce.Portal.PortalKey.ID)).
+				Msg("Cleared sidecar session ID from portal metadata")
+		}
+	}
 
 	ce.Reply("Conversation cleared. Removed %d messages (~%d tokens).", msgCount, tokens)
 }
