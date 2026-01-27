@@ -14,6 +14,120 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
+// resolveModelArg resolves a model argument (opus, sonnet, haiku, or full ID) to the actual model ID.
+// For sidecar mode, it returns the family name. For API mode, it resolves to the latest version.
+func (c *ClaudeConnector) resolveModelArg(ctx context.Context, ce *commands.Event, modelArg string) (string, error) {
+	isSidecar := c.isSidecarLogin(ce)
+	modelArg = strings.ToLower(modelArg)
+
+	switch modelArg {
+	case "opus", "claude-opus":
+		if isSidecar {
+			return "opus", nil
+		}
+		apiKey := c.getAPIKeyFromLogin(ce)
+		if apiKey == "" {
+			return "", fmt.Errorf("failed to get API credentials")
+		}
+		return claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "opus")
+
+	case "sonnet", "claude-sonnet":
+		if isSidecar {
+			return "sonnet", nil
+		}
+		apiKey := c.getAPIKeyFromLogin(ce)
+		if apiKey == "" {
+			return "", fmt.Errorf("failed to get API credentials")
+		}
+		return claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "sonnet")
+
+	case "haiku", "claude-haiku":
+		if isSidecar {
+			return "haiku", nil
+		}
+		apiKey := c.getAPIKeyFromLogin(ce)
+		if apiKey == "" {
+			return "", fmt.Errorf("failed to get API credentials")
+		}
+		return claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "haiku")
+
+	default:
+		// Validate model ID format
+		if err := ValidateModelID(modelArg); err != nil {
+			return "", fmt.Errorf("invalid model ID: %w", err)
+		}
+
+		// For API mode, validate the model exists
+		if !isSidecar {
+			apiKey := c.getAPIKeyFromLogin(ce)
+			if apiKey == "" {
+				return "", fmt.Errorf("failed to get API credentials")
+			}
+			if err := claudeapi.ValidateModel(ctx, apiKey, modelArg); err != nil {
+				return "", fmt.Errorf("invalid model: %w", err)
+			}
+		}
+		return modelArg, nil
+	}
+}
+
+// swapGhosts ensures the correct ghost is in the room for the new model.
+// If oldModel and newModel have different families, the old ghost is removed.
+// The new ghost is always ensured to be in the room.
+func (c *ClaudeConnector) swapGhosts(ctx context.Context, roomID id.RoomID, oldModel, newModel string) error {
+	oldFamily := claudeapi.GetModelFamily(oldModel)
+	newFamily := claudeapi.GetModelFamily(newModel)
+	familyChanged := oldFamily != newFamily
+
+	newGhostID := c.MakeClaudeGhostID(newModel)
+
+	// Get the new ghost and ensure it joins the room
+	newGhost, err := c.GetOrUpdateGhost(ctx, newGhostID, newModel)
+	if err != nil {
+		return fmt.Errorf("failed to get new ghost: %w", err)
+	}
+
+	// Have the new ghost join
+	if err := newGhost.Intent.EnsureJoined(ctx, roomID); err != nil {
+		// Try invite + join
+		if err := c.br.Bot.EnsureInvited(ctx, roomID, newGhost.Intent.GetMXID()); err != nil {
+			return fmt.Errorf("failed to invite new ghost: %w", err)
+		}
+		if err := newGhost.Intent.EnsureJoined(ctx, roomID); err != nil {
+			return fmt.Errorf("new ghost failed to join after invite: %w", err)
+		}
+	}
+
+	// Only remove old ghost if family changed
+	if familyChanged {
+		oldGhostID := c.MakeClaudeGhostID(oldModel)
+
+		// Have the old ghost leave the room
+		oldGhost, err := c.br.GetExistingGhostByID(ctx, oldGhostID)
+		if err == nil && oldGhost != nil {
+			// Use the underlying appservice IntentAPI's LeaveRoom method
+			if asIntent, ok := oldGhost.Intent.(*matrix.ASIntent); ok {
+				if _, err := asIntent.Matrix.LeaveRoom(ctx, roomID); err != nil {
+					c.Log.Warn().Err(err).Msg("Failed to leave old ghost from room")
+				}
+			} else {
+				// Fallback to SendState approach
+				leaveContent := &event.Content{Parsed: &event.MemberEventContent{Membership: event.MembershipLeave}}
+				if _, err := oldGhost.Intent.SendState(ctx, roomID, event.StateMember, oldGhost.Intent.GetMXID().String(), leaveContent, time.Time{}); err != nil {
+					c.Log.Warn().Err(err).Msg("Failed to send leave state for old ghost")
+				}
+			}
+		}
+
+		c.Log.Info().
+			Str("old_ghost", string(oldGhostID)).
+			Str("new_ghost", string(newGhostID)).
+			Msg("Swapped ghosts for model change")
+	}
+
+	return nil
+}
+
 // RegisterCommands registers custom commands for the Claude AI bridge.
 func (c *ClaudeConnector) RegisterCommands(proc *commands.Processor) {
 	proc.AddHandlers(
@@ -187,92 +301,21 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 	}
 
 	// Set new model - resolve alias if needed
-	newModel := strings.Join(ce.Args, "-")
-	isSidecar := c.isSidecarLogin(ce)
-
 	ctx, cancel := context.WithTimeout(ce.Ctx, 15*time.Second)
 	defer cancel()
 
-	// Map friendly shortcuts to model families
-	switch strings.ToLower(newModel) {
-	case "opus", "claude-opus":
-		if isSidecar {
-			// Sidecar: just use "opus" - Agent SDK handles it
-			newModel = "opus"
-		} else {
-			apiKey := c.getAPIKeyFromLogin(ce)
-			if apiKey == "" {
-				ce.Reply("Failed to get API credentials.")
-				return
-			}
-			resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "opus")
-			if err != nil {
-				ce.Reply("Failed to resolve opus model: %v", err)
-				return
-			}
-			newModel = resolved
-		}
-	case "sonnet", "claude-sonnet":
-		if isSidecar {
-			newModel = "sonnet"
-		} else {
-			apiKey := c.getAPIKeyFromLogin(ce)
-			if apiKey == "" {
-				ce.Reply("Failed to get API credentials.")
-				return
-			}
-			resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "sonnet")
-			if err != nil {
-				ce.Reply("Failed to resolve sonnet model: %v", err)
-				return
-			}
-			newModel = resolved
-		}
-	case "haiku", "claude-haiku":
-		if isSidecar {
-			newModel = "haiku"
-		} else {
-			apiKey := c.getAPIKeyFromLogin(ce)
-			if apiKey == "" {
-				ce.Reply("Failed to get API credentials.")
-				return
-			}
-			resolved, err := claudeapi.GetLatestModelByFamilyFromAPI(ctx, apiKey, "haiku")
-			if err != nil {
-				ce.Reply("Failed to resolve haiku model: %v", err)
-				return
-			}
-			newModel = resolved
-		}
-	default:
-		// Validate model ID format first (prevents abuse with overly long strings)
-		if err := ValidateModelID(newModel); err != nil {
-			ce.Reply("Invalid model ID: %v", err)
-			return
-		}
-
-		// For API mode, validate the model exists via API
-		if !isSidecar {
-			apiKey := c.getAPIKeyFromLogin(ce)
-			if apiKey == "" {
-				ce.Reply("Failed to get API credentials.")
-				return
-			}
-			if err := claudeapi.ValidateModel(ctx, apiKey, newModel); err != nil {
-				ce.Reply("Invalid model: `%s`\n\nError: %v\n\nRun `models` to see available options.", newModel, err)
-				return
-			}
-		}
-		// Sidecar mode: accept the model ID as-is, let sidecar validate
+	modelArg := strings.Join(ce.Args, "-")
+	newModel, err := c.resolveModelArg(ctx, ce, modelArg)
+	if err != nil {
+		ce.Reply("Failed to resolve model: %v\n\nRun `models` to see available options.", err)
+		return
 	}
 
-	// Check if model family changed (need to swap ghosts)
+	// Get old model for ghost swap
 	oldModel := meta.Model
 	if oldModel == "" {
 		oldModel = c.Config.GetDefaultModel()
 	}
-	oldFamily := claudeapi.GetModelFamily(oldModel)
-	newFamily := claudeapi.GetModelFamily(newModel)
 
 	// Update portal metadata
 	meta.Model = newModel
@@ -283,42 +326,10 @@ func (c *ClaudeConnector) cmdModel(ce *commands.Event) {
 	}
 
 	// Swap ghosts if family changed
-	if oldFamily != newFamily && ce.Portal.MXID != "" {
-		oldGhostID := c.MakeClaudeGhostID(oldModel)
-		newGhostID := c.MakeClaudeGhostID(newModel)
-
-		// Get the new ghost and ensure it joins the room
-		newGhost, err := c.GetOrUpdateGhost(ctx, newGhostID, newModel)
-		if err != nil {
-			c.Log.Warn().Err(err).Msg("Failed to get new ghost for model switch")
-		} else {
-			// Have the new ghost join
-			if err := newGhost.Intent.EnsureJoined(ctx, ce.Portal.MXID); err != nil {
-				c.Log.Warn().Err(err).Msg("Failed to join new ghost to room")
-			}
+	if ce.Portal.MXID != "" {
+		if err := c.swapGhosts(ctx, ce.Portal.MXID, oldModel, newModel); err != nil {
+			c.Log.Warn().Err(err).Msg("Failed to swap ghosts for model change")
 		}
-
-		// Have the old ghost leave the room
-		oldGhost, err := c.br.GetExistingGhostByID(ctx, oldGhostID)
-		if err == nil && oldGhost != nil {
-			// Use the underlying appservice IntentAPI's LeaveRoom method
-			if asIntent, ok := oldGhost.Intent.(*matrix.ASIntent); ok {
-				if _, err := asIntent.Matrix.LeaveRoom(ctx, ce.Portal.MXID); err != nil {
-					c.Log.Warn().Err(err).Msg("Failed to leave old ghost from room")
-				}
-			} else {
-				// Fallback to SendState approach
-				leaveContent := &event.Content{Parsed: &event.MemberEventContent{Membership: event.MembershipLeave}}
-				if _, err := oldGhost.Intent.SendState(ctx, ce.Portal.MXID, event.StateMember, oldGhost.Intent.GetMXID().String(), leaveContent, time.Time{}); err != nil {
-					c.Log.Warn().Err(err).Msg("Failed to send leave state for old ghost")
-				}
-			}
-		}
-
-		c.Log.Info().
-			Str("old_ghost", string(oldGhostID)).
-			Str("new_ghost", string(newGhostID)).
-			Msg("Swapped ghosts for model change")
 	}
 
 	displayName := claudeapi.GetModelDisplayName(newModel)
@@ -686,32 +697,29 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 			return
 		}
 
+		ctx, cancel := context.WithTimeout(ce.Ctx, 15*time.Second)
+		defer cancel()
+
 		// Get existing metadata to check current model
 		portalMeta, _ := ce.Portal.Metadata.(*PortalMetadata)
 		oldModel := ""
 		if portalMeta != nil {
 			oldModel = portalMeta.Model
 		}
+		if oldModel == "" {
+			oldModel = c.Config.GetDefaultModel()
+		}
 
-		// Parse model from args (same logic as new portal path)
+		// Resolve model from args using shared helper
 		model := c.Config.GetDefaultModel()
 		if len(ce.Args) > 0 {
-			requestedModel := strings.ToLower(strings.Join(ce.Args, "-"))
-			switch requestedModel {
-			case "opus", "claude-opus":
-				model = "opus"
-			case "sonnet", "claude-sonnet":
-				model = "sonnet"
-			case "haiku", "claude-haiku":
-				model = "haiku"
-			default:
-				if strings.Contains(requestedModel, "claude") {
-					model = requestedModel
-				} else {
-					ce.Reply("Unknown model: %s. Use `opus`, `sonnet`, `haiku`, or a full model ID.", requestedModel)
-					return
-				}
+			modelArg := strings.Join(ce.Args, "-")
+			resolved, err := c.resolveModelArg(ctx, ce, modelArg)
+			if err != nil {
+				ce.Reply("Failed to resolve model: %v\n\nUse `opus`, `sonnet`, `haiku`, or a full model ID.", err)
+				return
 			}
+			model = resolved
 		}
 
 		c.Log.Debug().
@@ -727,70 +735,27 @@ func (c *ClaudeConnector) cmdJoin(ce *commands.Event) {
 		portalMeta.Model = model
 		ce.Portal.Metadata = portalMeta
 
-		if err := ce.Portal.Save(ce.Ctx); err != nil {
+		if err := ce.Portal.Save(ctx); err != nil {
 			ce.Reply("Failed to save portal: %v", err)
 			return
 		}
 
-		// Get the ghost for the new model
-		ghostID := c.MakeClaudeGhostID(model)
-		ghost, err := c.GetOrUpdateGhost(ce.Ctx, ghostID, model)
-		if err != nil {
-			ce.Reply("Failed to get Claude ghost: %v", err)
+		// Swap ghosts if model changed (uses shared helper)
+		if err := c.swapGhosts(ctx, ce.RoomID, oldModel, model); err != nil {
+			ce.Reply("Failed to update Claude ghost: %v", err)
 			return
-		}
-
-		// Have the new ghost join the room
-		roomID := ce.RoomID
-		err = ghost.Intent.EnsureJoined(ce.Ctx, roomID)
-		if err != nil {
-			c.Log.Warn().Err(err).
-				Str("ghost_mxid", ghost.Intent.GetMXID().String()).
-				Msg("Failed to join room with ghost, trying invite first")
-
-			// Try to invite and then join
-			botIntent := c.br.Bot
-			err = botIntent.EnsureInvited(ce.Ctx, roomID, ghost.Intent.GetMXID())
-			if err != nil {
-				ce.Reply("Failed to invite Claude to this room: %v\n\nMake sure the bot has permission to invite users.", err)
-				return
-			}
-			err = ghost.Intent.EnsureJoined(ce.Ctx, roomID)
-			if err != nil {
-				ce.Reply("Claude was invited but failed to join: %v", err)
-				return
-			}
-		}
-
-		// If model changed, leave old ghost from room
-		if oldModel != "" && oldModel != model {
-			oldGhostID := c.MakeClaudeGhostID(oldModel)
-			if oldGhostID != ghostID {
-				oldGhost, err := c.br.GetExistingGhostByID(ce.Ctx, oldGhostID)
-				if err == nil && oldGhost != nil {
-					c.Log.Debug().
-						Str("old_ghost_id", string(oldGhostID)).
-						Msg("Leaving old ghost from room")
-					// Use the underlying appservice IntentAPI's LeaveRoom method
-					if asIntent, ok := oldGhost.Intent.(*matrix.ASIntent); ok {
-						if _, err := asIntent.Matrix.LeaveRoom(ce.Ctx, roomID); err != nil {
-							c.Log.Warn().Err(err).Msg("Failed to leave old ghost from room")
-						}
-					}
-				}
-			}
 		}
 
 		// Re-set relay if enabled
 		if c.br.Config.Relay.Enabled {
-			if err := ce.Portal.SetRelay(ce.Ctx, login); err != nil {
+			if err := ce.Portal.SetRelay(ctx, login); err != nil {
 				ce.Reply("Failed to set relay: %v", err)
 				return
 			}
 		}
 
 		displayName := claudeapi.GetModelDisplayName(model)
-		if oldModel != "" && oldModel != model {
+		if oldModel != model {
 			ce.Reply("✓ **%s** has joined the room! (replaced %s)\n\nUse `model` to change models, `mention on` for mention-only mode, or `clear` to reset conversation.", displayName, claudeapi.GetModelDisplayName(oldModel))
 		} else {
 			ce.Reply("✓ **%s** is in the room! Relay updated.\n\nUse `model` to change models, `mention on` for mention-only mode, or `clear` to reset conversation.", displayName)
