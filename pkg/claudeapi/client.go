@@ -81,7 +81,9 @@ func (c *Client) CreateMessage(ctx context.Context, req *CreateMessageRequest) (
 	duration := time.Since(startTime)
 	inputTokens := int(resp.Usage.InputTokens)
 	outputTokens := int(resp.Usage.OutputTokens)
-	c.Metrics.RecordRequest(req.Model, duration, inputTokens, outputTokens)
+	cacheCreationTokens := int(resp.Usage.CacheCreationInputTokens)
+	cacheReadTokens := int(resp.Usage.CacheReadInputTokens)
+	c.Metrics.RecordRequestWithCache(req.Model, duration, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens)
 
 	// Convert response to our format
 	return convertSDKResponse(resp), nil
@@ -134,7 +136,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 			}
 		}()
 		startTime := time.Now()
-		var inputTokens, outputTokens int
+		var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int
 
 		for stream.Next() {
 			// Check for context cancellation to prevent goroutine leak
@@ -160,6 +162,12 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 			if streamEvent.Message != nil && streamEvent.Message.Usage != nil {
 				if streamEvent.Message.Usage.InputTokens > 0 {
 					inputTokens = streamEvent.Message.Usage.InputTokens
+				}
+				if streamEvent.Message.Usage.CacheCreationTokens > 0 {
+					cacheCreationTokens = streamEvent.Message.Usage.CacheCreationTokens
+				}
+				if streamEvent.Message.Usage.CacheReadTokens > 0 {
+					cacheReadTokens = streamEvent.Message.Usage.CacheReadTokens
 				}
 			}
 			if streamEvent.Usage != nil && streamEvent.Usage.OutputTokens > 0 {
@@ -202,8 +210,10 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 				Dur("duration", duration).
 				Int("input_tokens", inputTokens).
 				Int("output_tokens", outputTokens).
+				Int("cache_creation_tokens", cacheCreationTokens).
+				Int("cache_read_tokens", cacheReadTokens).
 				Msg("Stream completed successfully, recording metrics")
-			c.Metrics.RecordRequest(req.Model, duration, inputTokens, outputTokens)
+			c.Metrics.RecordRequestWithCache(req.Model, duration, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens)
 		}
 	}()
 
@@ -272,8 +282,10 @@ func convertSDKResponse(resp *anthropic.Message) *CreateMessageResponse {
 		Model:      string(resp.Model),
 		StopReason: string(resp.StopReason),
 		Usage: &Usage{
-			InputTokens:  int(resp.Usage.InputTokens),
-			OutputTokens: int(resp.Usage.OutputTokens),
+			InputTokens:         int(resp.Usage.InputTokens),
+			OutputTokens:        int(resp.Usage.OutputTokens),
+			CacheCreationTokens: int(resp.Usage.CacheCreationInputTokens),
+			CacheReadTokens:     int(resp.Usage.CacheReadInputTokens),
 		},
 	}
 }
@@ -288,6 +300,12 @@ func convertSDKStreamEvent(event anthropic.MessageStreamEventUnion) *StreamEvent
 			usage := &Usage{}
 			if event.Message.Usage.InputTokens > 0 {
 				usage.InputTokens = int(event.Message.Usage.InputTokens)
+			}
+			if event.Message.Usage.CacheCreationInputTokens > 0 {
+				usage.CacheCreationTokens = int(event.Message.Usage.CacheCreationInputTokens)
+			}
+			if event.Message.Usage.CacheReadInputTokens > 0 {
+				usage.CacheReadTokens = int(event.Message.Usage.CacheReadInputTokens)
 			}
 			return &StreamEvent{
 				Type: "message_start",

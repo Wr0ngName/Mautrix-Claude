@@ -18,6 +18,10 @@ type Metrics struct {
 	TotalInputTokens  atomic.Int64
 	TotalOutputTokens atomic.Int64
 
+	// Cache token usage (prompt caching)
+	TotalCacheCreationTokens atomic.Int64
+	TotalCacheReadTokens     atomic.Int64
+
 	// Error counts by type
 	RateLimitErrors atomic.Int64
 	AuthErrors      atomic.Int64
@@ -42,10 +46,12 @@ type Metrics struct {
 
 // ModelMetrics tracks metrics for a specific model.
 type ModelMetrics struct {
-	Requests      atomic.Int64
-	InputTokens   atomic.Int64
-	OutputTokens  atomic.Int64
-	TotalDuration atomic.Int64 // nanoseconds
+	Requests            atomic.Int64
+	InputTokens         atomic.Int64
+	OutputTokens        atomic.Int64
+	CacheCreationTokens atomic.Int64
+	CacheReadTokens     atomic.Int64
+	TotalDuration       atomic.Int64 // nanoseconds
 }
 
 // NewMetrics creates a new Metrics instance.
@@ -57,10 +63,17 @@ func NewMetrics() *Metrics {
 
 // RecordRequest records a successful request.
 func (m *Metrics) RecordRequest(model string, duration time.Duration, inputTokens, outputTokens int) {
+	m.RecordRequestWithCache(model, duration, inputTokens, outputTokens, 0, 0)
+}
+
+// RecordRequestWithCache records a successful request including cache token usage.
+func (m *Metrics) RecordRequestWithCache(model string, duration time.Duration, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int) {
 	m.TotalRequests.Add(1)
 	m.SuccessfulRequests.Add(1)
 	m.TotalInputTokens.Add(int64(inputTokens))
 	m.TotalOutputTokens.Add(int64(outputTokens))
+	m.TotalCacheCreationTokens.Add(int64(cacheCreationTokens))
+	m.TotalCacheReadTokens.Add(int64(cacheReadTokens))
 	m.totalDuration.Add(int64(duration))
 	m.requestCount.Add(1)
 
@@ -69,6 +82,8 @@ func (m *Metrics) RecordRequest(model string, duration time.Duration, inputToken
 	mm.Requests.Add(1)
 	mm.InputTokens.Add(int64(inputTokens))
 	mm.OutputTokens.Add(int64(outputTokens))
+	mm.CacheCreationTokens.Add(int64(cacheCreationTokens))
+	mm.CacheReadTokens.Add(int64(cacheReadTokens))
 	mm.TotalDuration.Add(int64(duration))
 }
 
@@ -185,21 +200,23 @@ func (m *Metrics) GetAllModelNames() []string {
 // Snapshot returns a snapshot of the current metrics as a map.
 func (m *Metrics) Snapshot() map[string]interface{} {
 	return map[string]interface{}{
-		"total_requests":           m.TotalRequests.Load(),
-		"successful_requests":      m.SuccessfulRequests.Load(),
-		"failed_requests":          m.FailedRequests.Load(),
-		"total_input_tokens":       m.TotalInputTokens.Load(),
-		"total_output_tokens":      m.TotalOutputTokens.Load(),
-		"total_tokens":             m.GetTotalTokens(),
-		"rate_limit_errors":        m.RateLimitErrors.Load(),
-		"auth_errors":              m.AuthErrors.Load(),
-		"server_errors":            m.ServerErrors.Load(),
-		"other_errors":             m.OtherErrors.Load(),
-		"local_rate_limit_rejects": m.LocalRateLimitRejects.Load(),
-		"circuit_breaker_rejects":  m.CircuitBreakerRejects.Load(),
-		"circuit_breaker_opens":    m.CircuitBreakerOpens.Load(),
-		"average_duration_ms":      m.GetAverageRequestDuration().Milliseconds(),
-		"error_rate_percent":       m.GetErrorRate(),
+		"total_requests":             m.TotalRequests.Load(),
+		"successful_requests":        m.SuccessfulRequests.Load(),
+		"failed_requests":            m.FailedRequests.Load(),
+		"total_input_tokens":         m.TotalInputTokens.Load(),
+		"total_output_tokens":        m.TotalOutputTokens.Load(),
+		"total_tokens":               m.GetTotalTokens(),
+		"cache_creation_tokens":      m.TotalCacheCreationTokens.Load(),
+		"cache_read_tokens":          m.TotalCacheReadTokens.Load(),
+		"rate_limit_errors":          m.RateLimitErrors.Load(),
+		"auth_errors":                m.AuthErrors.Load(),
+		"server_errors":              m.ServerErrors.Load(),
+		"other_errors":               m.OtherErrors.Load(),
+		"local_rate_limit_rejects":   m.LocalRateLimitRejects.Load(),
+		"circuit_breaker_rejects":    m.CircuitBreakerRejects.Load(),
+		"circuit_breaker_opens":      m.CircuitBreakerOpens.Load(),
+		"average_duration_ms":        m.GetAverageRequestDuration().Milliseconds(),
+		"error_rate_percent":         m.GetErrorRate(),
 	}
 }
 
@@ -210,6 +227,8 @@ func (m *Metrics) Reset() {
 	m.FailedRequests.Store(0)
 	m.TotalInputTokens.Store(0)
 	m.TotalOutputTokens.Store(0)
+	m.TotalCacheCreationTokens.Store(0)
+	m.TotalCacheReadTokens.Store(0)
 	m.RateLimitErrors.Store(0)
 	m.AuthErrors.Store(0)
 	m.ServerErrors.Store(0)

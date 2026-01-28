@@ -509,6 +509,9 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 	// Get stats - different sources for sidecar vs API mode
 	var msgCount int
 	var inputTokens, outputTokens int64
+	var cacheCreationTokens, cacheReadTokens int64
+	var compactionCount int
+	var lastCompactionTime *float64
 	var lastUsed time.Time
 
 	if isSidecarMode {
@@ -520,6 +523,10 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 				msgCount = stats.MessageCount
 				inputTokens = stats.InputTokens
 				outputTokens = stats.OutputTokens
+				cacheCreationTokens = stats.CacheCreationTokens
+				cacheReadTokens = stats.CacheReadTokens
+				compactionCount = stats.CompactionCount
+				lastCompactionTime = stats.LastCompactionTime
 				if stats.LastUsed > 0 {
 					lastUsed = time.Unix(int64(stats.LastUsed), 0)
 				}
@@ -537,8 +544,25 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 	sb.WriteString(fmt.Sprintf("**Messages in context:** %d\n", msgCount))
 	if isSidecarMode {
 		// Sidecar provides actual token counts from Agent SDK
+		totalTokens := inputTokens + outputTokens
 		sb.WriteString(fmt.Sprintf("**Tokens used:** %d (in: %d, out: %d)\n",
-			inputTokens+outputTokens, inputTokens, outputTokens))
+			totalTokens, inputTokens, outputTokens))
+
+		// Cache stats (prompt caching)
+		if cacheCreationTokens > 0 || cacheReadTokens > 0 {
+			sb.WriteString(fmt.Sprintf("**Cache tokens:** created: %d, read: %d\n",
+				cacheCreationTokens, cacheReadTokens))
+		}
+
+		// Compaction info
+		if compactionCount > 0 {
+			sb.WriteString(fmt.Sprintf("**Context compactions:** %d", compactionCount))
+			if lastCompactionTime != nil && *lastCompactionTime > 0 {
+				lastCompaction := time.Unix(int64(*lastCompactionTime), 0)
+				sb.WriteString(fmt.Sprintf(" (last: %s ago)", time.Since(lastCompaction).Round(time.Second)))
+			}
+			sb.WriteString("\n")
+		}
 	} else {
 		sb.WriteString(fmt.Sprintf("**Estimated tokens:** ~%d\n", outputTokens))
 	}
@@ -569,6 +593,8 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 		failedReqs := metrics.FailedRequests.Load()
 		localInputTokens := metrics.TotalInputTokens.Load()
 		localOutputTokens := metrics.TotalOutputTokens.Load()
+		localCacheCreation := metrics.TotalCacheCreationTokens.Load()
+		localCacheRead := metrics.TotalCacheReadTokens.Load()
 
 		sb.WriteString(fmt.Sprintf("\n**API Stats (this session):**\n"))
 		sb.WriteString(fmt.Sprintf("• Requests: %d (%d failed)\n", totalReqs, failedReqs))
@@ -576,6 +602,11 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 			// Only show token breakdown for API mode (sidecar already shows above)
 			sb.WriteString(fmt.Sprintf("• Total tokens: %d (in: %d, out: %d)\n",
 				localInputTokens+localOutputTokens, localInputTokens, localOutputTokens))
+			// Show cache tokens if any were used
+			if localCacheCreation > 0 || localCacheRead > 0 {
+				sb.WriteString(fmt.Sprintf("• Cache tokens: created: %d, read: %d\n",
+					localCacheCreation, localCacheRead))
+			}
 		}
 		if avgDuration := metrics.GetAverageRequestDuration(); avgDuration > 0 {
 			sb.WriteString(fmt.Sprintf("• Avg response time: %s\n", avgDuration.Round(time.Millisecond)))

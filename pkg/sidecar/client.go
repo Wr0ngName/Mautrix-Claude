@@ -95,14 +95,18 @@ type ChatResponse struct {
 
 // SessionStats contains statistics about a session.
 type SessionStats struct {
-	SessionID    string  `json:"session_id"`
-	PortalID     string  `json:"portal_id"`
-	CreatedAt    float64 `json:"created_at"`
-	LastUsed     float64 `json:"last_used"`
-	MessageCount int     `json:"message_count"`
-	AgeSeconds   float64 `json:"age_seconds"`
-	InputTokens  int64   `json:"input_tokens"`
-	OutputTokens int64   `json:"output_tokens"`
+	SessionID            string   `json:"session_id"`
+	PortalID             string   `json:"portal_id"`
+	CreatedAt            float64  `json:"created_at"`
+	LastUsed             float64  `json:"last_used"`
+	MessageCount         int      `json:"message_count"`
+	AgeSeconds           float64  `json:"age_seconds"`
+	InputTokens          int64    `json:"input_tokens"`
+	OutputTokens         int64    `json:"output_tokens"`
+	CacheCreationTokens  int64    `json:"cache_creation_tokens"`
+	CacheReadTokens      int64    `json:"cache_read_tokens"`
+	CompactionCount      int      `json:"compaction_count"`
+	LastCompactionTime   *float64 `json:"last_compaction_time,omitempty"`
 }
 
 // HealthResponse is the response from the health endpoint.

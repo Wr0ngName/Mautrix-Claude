@@ -161,6 +161,12 @@ class Session:
     message_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Cache token tracking (for prompt caching)
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+    # Compaction tracking
+    compaction_count: int = 0
+    last_compaction_time: Optional[float] = None
 
 
 class ChatRequest(BaseModel):
@@ -198,6 +204,15 @@ class ChatRequest(BaseModel):
             )
 
 
+class UsageInfo(BaseModel):
+    """Detailed token usage information."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+    total_tokens: int = 0
+
+
 class ChatResponse(BaseModel):
     """Response body for chat endpoint."""
     portal_id: str
@@ -205,6 +220,8 @@ class ChatResponse(BaseModel):
     response: str
     model: str  # Actual model used for this request
     tokens_used: Optional[int] = None
+    usage: Optional[UsageInfo] = None  # Detailed usage breakdown
+    compacted: bool = False  # Whether compaction occurred during this request
 
 
 class SessionManager:
@@ -295,6 +312,10 @@ class SessionManager:
                     "age_seconds": time.time() - session.created_at,
                     "input_tokens": session.input_tokens,
                     "output_tokens": session.output_tokens,
+                    "cache_creation_tokens": session.cache_creation_tokens,
+                    "cache_read_tokens": session.cache_read_tokens,
+                    "compaction_count": session.compaction_count,
+                    "last_compaction_time": session.last_compaction_time,
                 }
             return None
 
@@ -681,22 +702,31 @@ async def test_auth(request: TestAuthRequest):
                 del os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
 
+@dataclass
+class QueryResult:
+    """Result of a query with detailed usage information."""
+    response_text: str = ""
+    session_id: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+    compacted: bool = False
+
+
 async def _run_query_with_timeout(
     prompt: str,
     options: ClaudeAgentOptions,
     timeout_seconds: int,
     portal_id: str,
-) -> tuple[str, str, int, int]:
+) -> QueryResult:
     """
     Run a query with timeout protection.
 
-    Returns (response_text, session_id, input_tokens, output_tokens).
+    Returns QueryResult with response, session_id, and detailed token usage.
     Raises TimeoutError if the query takes too long.
     """
-    response_text = ""
-    new_session_id = ""
-    request_input_tokens = 0
-    request_output_tokens = 0
+    result = QueryResult()
 
     try:
         async with asyncio.timeout(timeout_seconds):
@@ -704,26 +734,45 @@ async def _run_query_with_timeout(
                 # Capture session ID on init (returned to bridge for storage)
                 if hasattr(message, 'subtype') and message.subtype == 'init':
                     if hasattr(message, 'data') and 'session_id' in message.data:
-                        new_session_id = message.data['session_id']
-                        logger.debug(f"Got session_id from Agent SDK: {new_session_id}")
+                        result.session_id = message.data['session_id']
+                        logger.debug(f"Got session_id from Agent SDK: {result.session_id}")
 
-                # Capture result
-                if hasattr(message, 'result'):
-                    response_text = message.result
+                # Detect compaction events via SystemMessage
+                if hasattr(message, 'subtype') and message.subtype == 'compact':
+                    result.compacted = True
+                    logger.info(f"Context compaction occurred for portal {portal_id}")
 
-                # Capture token usage if available
-                if hasattr(message, 'usage'):
-                    if hasattr(message.usage, 'input_tokens'):
-                        request_input_tokens += message.usage.input_tokens
-                        TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
-                    if hasattr(message.usage, 'output_tokens'):
-                        request_output_tokens += message.usage.output_tokens
-                        TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+                # Capture result from ResultMessage
+                if hasattr(message, 'result') and message.result:
+                    result.response_text = message.result
+
+                # Capture detailed token usage from ResultMessage.usage dict
+                if hasattr(message, 'usage') and message.usage:
+                    usage = message.usage
+                    # Handle both dict and object-style access
+                    if isinstance(usage, dict):
+                        result.input_tokens += usage.get('input_tokens', 0)
+                        result.output_tokens += usage.get('output_tokens', 0)
+                        result.cache_creation_tokens += usage.get('cache_creation_input_tokens', 0)
+                        result.cache_read_tokens += usage.get('cache_read_input_tokens', 0)
+                    else:
+                        if hasattr(usage, 'input_tokens'):
+                            result.input_tokens += usage.input_tokens
+                        if hasattr(usage, 'output_tokens'):
+                            result.output_tokens += usage.output_tokens
+                        if hasattr(usage, 'cache_creation_input_tokens'):
+                            result.cache_creation_tokens += usage.cache_creation_input_tokens
+                        if hasattr(usage, 'cache_read_input_tokens'):
+                            result.cache_read_tokens += usage.cache_read_input_tokens
+
+                    # Update Prometheus metrics
+                    TOKENS_USED.labels(type='input').inc(result.input_tokens)
+                    TOKENS_USED.labels(type='output').inc(result.output_tokens)
     except asyncio.TimeoutError:
         logger.error(f"Query timed out after {timeout_seconds}s for portal {portal_id}")
         raise
 
-    return response_text, new_session_id, request_input_tokens, request_output_tokens
+    return result
 
 
 @app.post("/v1/chat", response_model=ChatResponse)
@@ -795,31 +844,26 @@ async def chat(request: ChatRequest):
 
             # Query Claude with timeout
             # If resume fails/times out, retry without session_id
-            response_text = ""
-            request_input_tokens = 0
-            request_output_tokens = 0
-            new_session_id = session_id_to_use or ""
+            query_result: QueryResult
 
             try:
-                response_text, new_session_id, request_input_tokens, request_output_tokens = \
-                    await _run_query_with_timeout(
-                        prompt=request.message,
-                        options=options,
-                        timeout_seconds=QUERY_TIMEOUT,
-                        portal_id=request.portal_id,
-                    )
+                query_result = await _run_query_with_timeout(
+                    prompt=request.message,
+                    options=options,
+                    timeout_seconds=QUERY_TIMEOUT,
+                    portal_id=request.portal_id,
+                )
             except asyncio.TimeoutError:
                 # If we were trying to resume a session and it timed out, retry without resume
                 if session_id_to_use:
                     logger.warning(f"Session resume timed out for {request.portal_id}, retrying without session_id")
                     options.resume = None
-                    response_text, new_session_id, request_input_tokens, request_output_tokens = \
-                        await _run_query_with_timeout(
-                            prompt=request.message,
-                            options=options,
-                            timeout_seconds=QUERY_TIMEOUT,
-                            portal_id=request.portal_id,
-                        )
+                    query_result = await _run_query_with_timeout(
+                        prompt=request.message,
+                        options=options,
+                        timeout_seconds=QUERY_TIMEOUT,
+                        portal_id=request.portal_id,
+                    )
                 else:
                     # No session to retry without, propagate the timeout
                     raise HTTPException(
@@ -828,29 +872,47 @@ async def chat(request: ChatRequest):
                     )
 
             # Estimate tokens if Agent SDK didn't provide them (~4 chars per token)
-            if request_input_tokens == 0 and request.message:
-                request_input_tokens = max(1, len(request.message) // 4)
-                TOKENS_USED.labels(type='input').inc(request_input_tokens)
-            if request_output_tokens == 0 and response_text:
-                request_output_tokens = max(1, len(response_text) // 4)
-                TOKENS_USED.labels(type='output').inc(request_output_tokens)
+            if query_result.input_tokens == 0 and request.message:
+                query_result.input_tokens = max(1, len(request.message) // 4)
+                TOKENS_USED.labels(type='input').inc(query_result.input_tokens)
+            if query_result.output_tokens == 0 and query_result.response_text:
+                query_result.output_tokens = max(1, len(query_result.response_text) // 4)
+                TOKENS_USED.labels(type='output').inc(query_result.output_tokens)
 
-            # Update session
+            # Update session with detailed usage
             session.message_count += 1
             session.last_used = time.time()
-            session.input_tokens += request_input_tokens
-            session.output_tokens += request_output_tokens
+            session.input_tokens += query_result.input_tokens
+            session.output_tokens += query_result.output_tokens
+            session.cache_creation_tokens += query_result.cache_creation_tokens
+            session.cache_read_tokens += query_result.cache_read_tokens
+
+            # Track compaction
+            if query_result.compacted:
+                session.compaction_count += 1
+                session.last_compaction_time = time.time()
 
             REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='success').inc()
             REQUEST_DURATION.observe(time.time() - start_time)
 
-            tokens_used = request_input_tokens + request_output_tokens
+            # Build detailed usage info
+            total_tokens = query_result.input_tokens + query_result.output_tokens
+            usage_info = UsageInfo(
+                input_tokens=query_result.input_tokens,
+                output_tokens=query_result.output_tokens,
+                cache_creation_tokens=query_result.cache_creation_tokens,
+                cache_read_tokens=query_result.cache_read_tokens,
+                total_tokens=total_tokens,
+            )
+
             return ChatResponse(
                 portal_id=request.portal_id,
-                session_id=new_session_id or "",  # Return session_id for bridge to store
-                response=response_text,
+                session_id=query_result.session_id or "",  # Return session_id for bridge to store
+                response=query_result.response_text,
                 model=actual_model,
-                tokens_used=tokens_used if tokens_used > 0 else None
+                tokens_used=total_tokens if total_tokens > 0 else None,
+                usage=usage_info,
+                compacted=query_result.compacted,
             )
 
         except HTTPException:
