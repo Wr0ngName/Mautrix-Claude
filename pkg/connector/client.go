@@ -18,6 +18,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
+	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 	"go.mau.fi/mautrix-claude/pkg/sidecar"
@@ -93,6 +94,17 @@ func (c *ClaudeClient) downloadAndEncodeImage(ctx context.Context, content *even
 	}, nil
 }
 
+// recentMention tracks when a user mentioned Claude in a portal.
+type recentMention struct {
+	userID    id.UserID
+	portalID  networkid.PortalID
+	timestamp time.Time
+}
+
+// recentMentionWindow is how long after a mention we still process images from that user.
+// Set to 1 second since captions and images arrive almost simultaneously from Matrix.
+const recentMentionWindow = 1 * time.Second
+
 // ClaudeClient represents a client connection to Claude (API or Web).
 type ClaudeClient struct {
 	MessageClient claudeapi.MessageClient // Can be *claudeapi.Client or *claudeapi.WebClient
@@ -103,6 +115,10 @@ type ClaudeClient struct {
 
 	// Rate limiting
 	rateLimiter *RateLimiter
+
+	// Recent mention tracking for images following mentions
+	recentMentions []recentMention
+	mentionMu      sync.Mutex
 
 	// Graceful shutdown support
 	wg     sync.WaitGroup
@@ -377,6 +393,50 @@ func (c *ClaudeClient) isClaudeMentioned(msg *bridgev2.MatrixMessage) bool {
 	return false
 }
 
+// recordMention records that a user mentioned Claude in a portal.
+// This allows subsequent images from the same user to be processed.
+func (c *ClaudeClient) recordMention(userID id.UserID, portalID networkid.PortalID) {
+	c.mentionMu.Lock()
+	defer c.mentionMu.Unlock()
+
+	now := time.Now()
+
+	// Clean up old mentions
+	validMentions := make([]recentMention, 0, len(c.recentMentions))
+	for _, m := range c.recentMentions {
+		if now.Sub(m.timestamp) < recentMentionWindow {
+			validMentions = append(validMentions, m)
+		}
+	}
+
+	// Add new mention
+	validMentions = append(validMentions, recentMention{
+		userID:    userID,
+		portalID:  portalID,
+		timestamp: now,
+	})
+
+	c.recentMentions = validMentions
+}
+
+// consumeRecentMention checks if a user has recently mentioned Claude in a portal.
+// If found, it removes the mention (allowing only 1 image per mention).
+// Used to allow images that immediately follow a mention message.
+func (c *ClaudeClient) consumeRecentMention(userID id.UserID, portalID networkid.PortalID) bool {
+	c.mentionMu.Lock()
+	defer c.mentionMu.Unlock()
+
+	now := time.Now()
+	for i, m := range c.recentMentions {
+		if m.userID == userID && m.portalID == portalID && now.Sub(m.timestamp) < recentMentionWindow {
+			// Remove this mention (consume it - only 1 image per mention)
+			c.recentMentions = append(c.recentMentions[:i], c.recentMentions[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // getConversationManager gets or creates a conversation manager for a portal.
 func (c *ClaudeClient) getConversationManager(portal *bridgev2.Portal) *claudeapi.ConversationManager {
 	c.convMu.Lock()
@@ -419,12 +479,21 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	// Check mention-only mode
 	if meta.MentionOnly {
-		if !c.isClaudeMentioned(msg) {
+		mentioned := c.isClaudeMentioned(msg)
+		isImage := msg.Content.MsgType == event.MsgImage
+
+		if mentioned {
+			// Record this mention so subsequent images from this user are processed
+			c.recordMention(msg.Event.Sender, msg.Portal.PortalKey.ID)
+			c.Connector.Log.Debug().Msg("Mention-only mode: Claude mentioned, processing message")
+		} else if isImage && c.consumeRecentMention(msg.Event.Sender, msg.Portal.PortalKey.ID) {
+			// Image immediately following a mention - process it (one image per mention)
+			c.Connector.Log.Debug().Msg("Mention-only mode: Image following recent mention, processing")
+		} else {
 			c.Connector.Log.Debug().Msg("Mention-only mode: Claude not mentioned, ignoring message")
 			// Return empty response to indicate message was handled but no action taken
 			return &bridgev2.MatrixMessageResponse{}, nil
 		}
-		c.Connector.Log.Debug().Msg("Mention-only mode: Claude mentioned, processing message")
 	}
 
 	// Check rate limit before processing
