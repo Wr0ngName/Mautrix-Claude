@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
@@ -937,13 +938,21 @@ func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Por
 // We start at 32KB and recursively split smaller if HTML expansion exceeds limits.
 const MaxMessageSize = 32000
 
-// MaxMatrixEventSize is the maximum safe size for body + formatted_body BEFORE encryption.
-// Matrix spec: unencrypted events max 65KB, but ENCRYPTED events max 49152 bytes (48KB).
-// Source: https://github.com/element-hq/element-web/issues/19330
-// Encryption overhead: base64 (~33% larger) + megolm metadata (~2KB)
-// Calculation: (X * 1.33) + 2000 < 49152 → X < 35450
-// Using 35KB to stay safely under the encrypted message limit.
-const MaxMatrixEventSize = 35000
+// Matrix spec: complete event MUST NOT exceed 65536 bytes (64 KiB) in federation format.
+// Source: https://spec.matrix.org/v1.17/client-server-api/#size-limits
+// For content (body + formatted_body), we subtract ~5KB for event metadata/signatures.
+const (
+	// MaxUnencryptedEventContent is max body+formatted_body for unencrypted events.
+	// 65536 - ~5KB metadata = ~60KB usable for content.
+	MaxUnencryptedEventContent = 60000
+
+	// MaxEncryptedEventContent is max body+formatted_body BEFORE encryption.
+	// Encrypted content = base64(ciphertext) + megolm metadata.
+	// Base64 adds ~33%, megolm adds ~2KB, event wrapper adds ~3KB.
+	// Calculation: (X * 1.33) + 5000 < 65536 → X < 45515
+	// Using 45KB to have safety margin.
+	MaxEncryptedEventContent = 45000
+)
 
 // MinMessageSize is the smallest we'll split to avoid infinite loops.
 // If a single chunk at this size still exceeds Matrix limits, we truncate.
@@ -960,8 +969,17 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 
+	// Determine max event size based on encryption config
+	// Encryption config is on the Matrix connector, not the bridge config
+	maxEventSize := MaxUnencryptedEventContent
+	if matrixConn, ok := c.Connector.br.Matrix.(*matrix.Connector); ok {
+		if matrixConn.Config.Encryption.Allow || matrixConn.Config.Encryption.Default {
+			maxEventSize = MaxEncryptedEventContent
+		}
+	}
+
 	// Split message with HTML size validation
-	parts := splitMessageWithValidation(text, MaxMessageSize, c.Connector.Log)
+	parts := splitMessageWithValidation(text, MaxMessageSize, maxEventSize, c.Connector.Log)
 
 	for i, part := range parts {
 		partID := messageID
@@ -1023,7 +1041,7 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 // splitMessageWithValidation splits a message and validates that each part's
 // rendered HTML will fit within Matrix event size limits. If a part is still
 // too large after rendering, it recursively splits smaller.
-func splitMessageWithValidation(text string, maxSize int, log zerolog.Logger) []string {
+func splitMessageWithValidation(text string, maxSize int, maxEventSize int, log zerolog.Logger) []string {
 	if len(text) == 0 {
 		return nil
 	}
@@ -1041,11 +1059,11 @@ func splitMessageWithValidation(text string, maxSize int, log zerolog.Logger) []
 			Int("part_size", len(part)).
 			Int("html_size", len(rendered.FormattedBody)).
 			Int("event_size", eventSize).
-			Int("max_event_size", MaxMatrixEventSize).
-			Bool("fits", eventSize <= MaxMatrixEventSize).
+			Int("max_event_size", maxEventSize).
+			Bool("fits", eventSize <= maxEventSize).
 			Msg("Validating message part size")
 
-		if eventSize <= MaxMatrixEventSize {
+		if eventSize <= maxEventSize {
 			// This part fits, add it
 			validatedParts = append(validatedParts, part)
 		} else if maxSize <= MinMessageSize {
@@ -1056,7 +1074,7 @@ func splitMessageWithValidation(text string, maxSize int, log zerolog.Logger) []
 				Int("event_size", eventSize).
 				Msg("Message part exceeds Matrix limit even at minimum split size, truncating")
 
-			truncated := truncateToFit(part, MaxMatrixEventSize)
+			truncated := truncateToFit(part, maxEventSize)
 			validatedParts = append(validatedParts, truncated)
 		} else {
 			// Part is too large, recursively split smaller
@@ -1071,7 +1089,7 @@ func splitMessageWithValidation(text string, maxSize int, log zerolog.Logger) []
 				Int("new_max_size", smallerSize).
 				Msg("Message part too large after HTML rendering, splitting smaller")
 
-			subParts := splitMessageWithValidation(part, smallerSize, log)
+			subParts := splitMessageWithValidation(part, smallerSize, maxEventSize, log)
 			validatedParts = append(validatedParts, subParts...)
 		}
 	}
