@@ -933,13 +933,22 @@ func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Por
 	})
 }
 
-// MaxMessageSize is the maximum size for a single Matrix message in bytes.
-// Matrix events have a ~64KB limit, but with encryption overhead and HTML formatting,
-// we use a conservative limit to avoid M_TOO_LARGE errors.
-const MaxMessageSize = 30000
+// MaxMessageSize is the initial target size for splitting plaintext messages.
+// We start at 32KB and recursively split smaller if HTML expansion exceeds limits.
+const MaxMessageSize = 32000
+
+// MaxMatrixEventSize is the maximum safe size for a Matrix event.
+// Matrix has a ~64KB hard limit, but we use 55KB to leave room for
+// encryption overhead, event metadata, and safety margin.
+const MaxMatrixEventSize = 55000
+
+// MinMessageSize is the smallest we'll split to avoid infinite loops.
+// If a single chunk at this size still exceeds Matrix limits, we truncate.
+const MinMessageSize = 2000
 
 // queueAssistantResponse sends the assistant's message to the Matrix room.
 // If the message is too large, it splits it into multiple messages.
+// It validates rendered HTML size and recursively splits if needed.
 func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, messageID string, tokensUsed int) {
 	model := c.Connector.Config.GetDefaultModel()
 	if meta, ok := portal.Metadata.(*PortalMetadata); ok && meta != nil && meta.Model != "" {
@@ -948,8 +957,8 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 
-	// Split message if too large
-	parts := splitMessage(text, MaxMessageSize)
+	// Split message with HTML size validation
+	parts := splitMessageWithValidation(text, MaxMessageSize, c.Connector.Log)
 
 	for i, part := range parts {
 		partID := messageID
@@ -1006,6 +1015,90 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 			Int("total_size", len(text)).
 			Msg("Split large Claude response into multiple messages")
 	}
+}
+
+// splitMessageWithValidation splits a message and validates that each part's
+// rendered HTML will fit within Matrix event size limits. If a part is still
+// too large after rendering, it recursively splits smaller.
+func splitMessageWithValidation(text string, maxSize int, log zerolog.Logger) []string {
+	if len(text) == 0 {
+		return nil
+	}
+
+	// First pass: split by plaintext size
+	initialParts := splitMessage(text, maxSize)
+
+	var validatedParts []string
+	for _, part := range initialParts {
+		// Render to HTML and check total event size
+		rendered := format.RenderMarkdown(part, true, true)
+		eventSize := len(part) + len(rendered.FormattedBody) // body + formatted_body
+
+		if eventSize <= MaxMatrixEventSize {
+			// This part fits, add it
+			validatedParts = append(validatedParts, part)
+		} else if maxSize <= MinMessageSize {
+			// We've hit minimum size but still too large - truncate with notice
+			log.Warn().
+				Int("part_size", len(part)).
+				Int("html_size", len(rendered.FormattedBody)).
+				Int("event_size", eventSize).
+				Msg("Message part exceeds Matrix limit even at minimum split size, truncating")
+
+			truncated := truncateToFit(part, MaxMatrixEventSize)
+			validatedParts = append(validatedParts, truncated)
+		} else {
+			// Part is too large, recursively split smaller
+			smallerSize := maxSize / 2
+			if smallerSize < MinMessageSize {
+				smallerSize = MinMessageSize
+			}
+			log.Debug().
+				Int("part_size", len(part)).
+				Int("html_size", len(rendered.FormattedBody)).
+				Int("event_size", eventSize).
+				Int("new_max_size", smallerSize).
+				Msg("Message part too large after HTML rendering, splitting smaller")
+
+			subParts := splitMessageWithValidation(part, smallerSize, log)
+			validatedParts = append(validatedParts, subParts...)
+		}
+	}
+
+	return validatedParts
+}
+
+// truncateToFit truncates text to fit within the Matrix event size limit.
+// It adds a notice that content was truncated.
+func truncateToFit(text string, maxEventSize int) string {
+	const truncationNotice = "\n\n⚠️ *[Message truncated due to size limits]*"
+
+	// Binary search for the right size
+	// We need: len(truncated) + len(rendered_html) <= maxEventSize
+	// Start with a conservative estimate
+	targetSize := maxEventSize / 4 // Assume up to 4x HTML expansion
+
+	for targetSize > 100 {
+		candidate := text
+		if len(text) > targetSize {
+			// Find a good break point
+			breakPoint := findSplitPoint(text, targetSize)
+			candidate = strings.TrimSpace(text[:breakPoint]) + truncationNotice
+		}
+
+		rendered := format.RenderMarkdown(candidate, true, true)
+		eventSize := len(candidate) + len(rendered.FormattedBody)
+
+		if eventSize <= maxEventSize {
+			return candidate
+		}
+
+		// Still too large, try smaller
+		targetSize = targetSize * 3 / 4
+	}
+
+	// Absolute fallback - just return the notice
+	return "⚠️ *[Message could not be delivered due to size limits. Please check logs.]*"
 }
 
 // splitMessage splits a message into chunks that fit within the size limit.
