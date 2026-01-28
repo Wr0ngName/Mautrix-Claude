@@ -393,6 +393,51 @@ func (c *ClaudeClient) isClaudeMentioned(msg *bridgev2.MatrixMessage) bool {
 	return false
 }
 
+// isMentionOnlyMessage checks if the message contains only a mention with no real content.
+// Used to detect messages like "@claude" that are just triggering image processing.
+func (c *ClaudeClient) isMentionOnlyMessage(msg *bridgev2.MatrixMessage) bool {
+	// Get the plain text body
+	body := strings.TrimSpace(msg.Content.Body)
+
+	// Remove the mention to see if there's any remaining content
+	// Common patterns: "@claude", "@claude:", "@claude_sonnet", etc.
+	cleaned := body
+
+	// Remove HTML mention pills from formatted body check
+	// The plain body usually contains the display name like "@claude_sonnet:server.com"
+	// or just "Claude" depending on the client
+
+	// Remove @mentions (MXID format)
+	for {
+		atIdx := strings.Index(cleaned, "@claude")
+		if atIdx == -1 {
+			break
+		}
+		// Find the end of this mention (space, colon followed by space, or end of string)
+		endIdx := atIdx + 7 // "@claude" length
+		for endIdx < len(cleaned) {
+			ch := cleaned[endIdx]
+			if ch == ' ' || ch == '\n' || ch == '\t' {
+				break
+			}
+			endIdx++
+		}
+		cleaned = cleaned[:atIdx] + cleaned[endIdx:]
+	}
+
+	// Remove standalone "Claude" (display name mention)
+	cleaned = strings.ReplaceAll(cleaned, "Claude", "")
+	cleaned = strings.ReplaceAll(cleaned, "claude", "")
+
+	// Remove common punctuation that might follow a mention
+	cleaned = strings.TrimSpace(cleaned)
+	cleaned = strings.Trim(cleaned, ":,;.!?")
+	cleaned = strings.TrimSpace(cleaned)
+
+	// If nothing meaningful remains, it's a mention-only message
+	return len(cleaned) == 0
+}
+
 // recordMention records that a user mentioned Claude in a portal.
 // This allows subsequent images from the same user to be processed.
 func (c *ClaudeClient) recordMention(userID id.UserID, portalID networkid.PortalID) {
@@ -485,6 +530,13 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		if mentioned {
 			// Record this mention so subsequent images from this user are processed
 			c.recordMention(msg.Event.Sender, msg.Portal.PortalKey.ID)
+
+			// Check if this is a mention-only message (e.g., just "@claude" with no real content)
+			// These are typically sent as captions for images, so don't send to Claude - wait for the image
+			if c.isMentionOnlyMessage(msg) {
+				c.Connector.Log.Debug().Msg("Mention-only mode: Mention-only message (no content), waiting for image")
+				return &bridgev2.MatrixMessageResponse{}, nil
+			}
 			c.Connector.Log.Debug().Msg("Mention-only mode: Claude mentioned, processing message")
 		} else if isImage && c.consumeRecentMention(msg.Event.Sender, msg.Portal.PortalKey.ID) {
 			// Image immediately following a mention - process it (one image per mention)
