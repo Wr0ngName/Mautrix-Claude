@@ -394,27 +394,22 @@ func (c *ClaudeClient) isClaudeMentioned(msg *bridgev2.MatrixMessage) bool {
 }
 
 // isMentionOnlyMessage checks if the message contains only a mention with no real content.
-// Used to detect messages like "@claude" that are just triggering image processing.
+// Used to detect messages like "@claude_sonnet:server.com" that are just triggering image processing.
 func (c *ClaudeClient) isMentionOnlyMessage(msg *bridgev2.MatrixMessage) bool {
 	// Get the plain text body
 	body := strings.TrimSpace(msg.Content.Body)
 
-	// Remove the mention to see if there's any remaining content
-	// Common patterns: "@claude", "@claude:", "@claude_sonnet", etc.
+	// Remove Matrix MXIDs that start with @claude (e.g., @claude_sonnet:server.com)
+	// These are the actual mention format in Matrix
 	cleaned := body
-
-	// Remove HTML mention pills from formatted body check
-	// The plain body usually contains the display name like "@claude_sonnet:server.com"
-	// or just "Claude" depending on the client
-
-	// Remove @mentions (MXID format)
 	for {
-		atIdx := strings.Index(cleaned, "@claude")
+		atIdx := strings.Index(strings.ToLower(cleaned), "@claude")
 		if atIdx == -1 {
 			break
 		}
-		// Find the end of this mention (space, colon followed by space, or end of string)
-		endIdx := atIdx + 7 // "@claude" length
+		// Find the end of this MXID (space, newline, or end of string)
+		// MXIDs are @localpart:server.com format
+		endIdx := atIdx + 1
 		for endIdx < len(cleaned) {
 			ch := cleaned[endIdx]
 			if ch == ' ' || ch == '\n' || ch == '\t' {
