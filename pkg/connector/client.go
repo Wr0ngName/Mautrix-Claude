@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
-	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
@@ -938,29 +938,12 @@ func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Por
 // We start at 32KB and recursively split smaller if HTML expansion exceeds limits.
 const MaxMessageSize = 32000
 
-// Matrix spec: complete event MUST NOT exceed 65536 bytes (64 KiB) in federation format.
-// Source: https://spec.matrix.org/v1.17/client-server-api/#size-limits
-// For content (body + formatted_body), we subtract ~5KB for event metadata/signatures.
-const (
-	// MaxUnencryptedEventContent is max body+formatted_body for unencrypted events.
-	// 65536 - ~5KB metadata = ~60KB usable for content.
-	MaxUnencryptedEventContent = 60000
-
-	// MaxEncryptedEventContent is max body+formatted_body BEFORE encryption.
-	// Encrypted content = base64(ciphertext) + megolm metadata.
-	// Base64 adds ~33%, megolm adds ~2KB, event wrapper adds ~3KB.
-	// Calculation: (X * 1.33) + 5000 < 65536 → X < 45515
-	// Using 45KB to have safety margin.
-	MaxEncryptedEventContent = 45000
-)
-
 // MinMessageSize is the smallest we'll split to avoid infinite loops.
 // If a single chunk at this size still exceeds Matrix limits, we truncate.
 const MinMessageSize = 2000
 
 // queueAssistantResponse sends the assistant's message to the Matrix room.
-// If the message is too large, it splits it into multiple messages.
-// It validates rendered HTML size and recursively splits if needed.
+// If the message is too large (M_TOO_LARGE), it recursively splits and retries.
 func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, messageID string, tokensUsed int) {
 	model := c.Connector.Config.GetDefaultModel()
 	if meta, ok := portal.Metadata.(*PortalMetadata); ok && meta != nil && meta.Model != "" {
@@ -969,165 +952,104 @@ func (c *ClaudeClient) queueAssistantResponse(portal *bridgev2.Portal, text, mes
 
 	ghostID := c.Connector.MakeClaudeGhostID(model)
 
-	// Determine max event size based on encryption config
-	// Encryption config is on the Matrix connector, not the bridge config
-	maxEventSize := MaxUnencryptedEventContent
-	if matrixConn, ok := c.Connector.br.Matrix.(*matrix.Connector); ok {
-		if matrixConn.Config.Encryption.Allow || matrixConn.Config.Encryption.Default {
-			maxEventSize = MaxEncryptedEventContent
-		}
+	// Get the ghost to send messages
+	ctx := context.Background()
+	ghost, err := c.Connector.GetOrUpdateGhost(ctx, ghostID, model)
+	if err != nil {
+		c.Connector.Log.Error().Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to get ghost for message sending")
+		return
 	}
 
-	// Split message with HTML size validation
-	parts := splitMessageWithValidation(text, MaxMessageSize, maxEventSize, c.Connector.Log)
+	// Send with retry on M_TOO_LARGE
+	c.sendMessageWithRetry(ctx, portal, ghost, text, messageID, tokensUsed, MaxMessageSize)
+}
+
+// sendMessageWithRetry sends a message, and if it gets M_TOO_LARGE, splits and retries.
+func (c *ClaudeClient) sendMessageWithRetry(ctx context.Context, portal *bridgev2.Portal, ghost *bridgev2.Ghost, text, messageID string, tokensUsed int, maxSize int) {
+	// Split message at current size limit
+	parts := splitMessage(text, maxSize)
 
 	for i, part := range parts {
 		partID := messageID
-		partTokens := 0
 		if len(parts) > 1 {
 			partID = fmt.Sprintf("%s_part%d", messageID, i+1)
-			// Only count tokens on first part
-			if i == 0 {
-				partTokens = tokensUsed
-			}
-		} else {
-			partTokens = tokensUsed
 		}
 
-		// Capture loop variables for closure
-		partText := part
-		partMessageID := partID
+		// Render markdown to HTML
+		content := format.RenderMarkdown(part, true, true)
+		content.MsgType = event.MsgText
 
-		c.UserLogin.QueueRemoteEvent(&simplevent.Message[*MessageMetadata]{
-			EventMeta: simplevent.EventMeta{
-				Type: bridgev2.RemoteEventMessage,
-				LogContext: func(c zerolog.Context) zerolog.Context {
-					return c.Str("claude_message_id", partMessageID)
-				},
-				PortalKey: portal.PortalKey,
-				Sender:    bridgev2.EventSender{Sender: ghostID},
-				Timestamp: time.Now(),
-			},
-			ID: MakeClaudeMessageID(partMessageID),
-			Data: &MessageMetadata{
-				ClaudeMessageID: partMessageID,
-				TokensUsed:      partTokens,
-			},
-			ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
-				// Convert markdown to Matrix HTML format
-				content := format.RenderMarkdown(partText, true, true)
-				content.MsgType = event.MsgText
-				return &bridgev2.ConvertedMessage{
-					Parts: []*bridgev2.ConvertedMessagePart{
-						{
-							ID:      networkid.PartID(partMessageID),
-							Type:    event.EventMessage,
-							Content: &content,
-						},
-					},
-				}, nil
-			},
-		})
+		// Try to send via Intent
+		resp, err := ghost.Intent.SendMessage(ctx, portal.MXID, event.EventMessage, &event.Content{
+			Parsed: &content,
+		}, nil)
+
+		if err != nil {
+			// Check if it's M_TOO_LARGE error
+			var respErr mautrix.RespError
+			if errors.As(err, &respErr) && respErr.ErrCode == "M_TOO_LARGE" {
+				c.Connector.Log.Warn().
+					Int("part_size", len(part)).
+					Int("max_size", maxSize).
+					Str("part_id", partID).
+					Msg("Message too large, splitting smaller and retrying")
+
+				// Reduce size and retry this part
+				newMaxSize := maxSize / 2
+				if newMaxSize < MinMessageSize {
+					// Can't split smaller, send error notice
+					c.Connector.Log.Error().
+						Int("part_size", len(part)).
+						Str("part_id", partID).
+						Msg("Message part too large even at minimum size, sending error notice")
+					c.sendSizeErrorNotice(ctx, portal, ghost)
+					return
+				}
+				// Retry this part with smaller size
+				partTokens := 0
+				if i == 0 {
+					partTokens = tokensUsed
+				}
+				c.sendMessageWithRetry(ctx, portal, ghost, part, partID, partTokens, newMaxSize)
+				continue
+			}
+
+			// Other error - log and send notice
+			c.Connector.Log.Error().Err(err).Str("part_id", partID).Msg("Failed to send message to Matrix")
+			c.sendSizeErrorNotice(ctx, portal, ghost)
+			return
+		}
+
+		c.Connector.Log.Debug().
+			Stringer("event_id", resp.EventID).
+			Str("part_id", partID).
+			Int("part_size", len(part)).
+			Msg("Sent message part to Matrix")
 	}
 
 	if len(parts) > 1 {
 		c.Connector.Log.Info().
 			Int("parts", len(parts)).
 			Int("total_size", len(text)).
+			Int("max_size", maxSize).
 			Msg("Split large Claude response into multiple messages")
 	}
 }
 
-// splitMessageWithValidation splits a message and validates that each part's
-// rendered HTML will fit within Matrix event size limits. If a part is still
-// too large after rendering, it recursively splits smaller.
-func splitMessageWithValidation(text string, maxSize int, maxEventSize int, log zerolog.Logger) []string {
-	if len(text) == 0 {
-		return nil
+// sendSizeErrorNotice sends an error notice when a message is too large to send
+// even after splitting to minimum size. This is rare and indicates unusual content.
+func (c *ClaudeClient) sendSizeErrorNotice(ctx context.Context, portal *bridgev2.Portal, ghost *bridgev2.Ghost) {
+	notice := "⚠️ Part of Claude's response could not be delivered due to Matrix size limits."
+	content := &event.MessageEventContent{
+		MsgType: event.MsgNotice,
+		Body:    notice,
 	}
-
-	// First pass: split by plaintext size
-	initialParts := splitMessage(text, maxSize)
-
-	var validatedParts []string
-	for _, part := range initialParts {
-		// Render to HTML and check total event size
-		rendered := format.RenderMarkdown(part, true, true)
-		eventSize := len(part) + len(rendered.FormattedBody) // body + formatted_body
-
-		log.Debug().
-			Int("part_size", len(part)).
-			Int("html_size", len(rendered.FormattedBody)).
-			Int("event_size", eventSize).
-			Int("max_event_size", maxEventSize).
-			Bool("fits", eventSize <= maxEventSize).
-			Msg("Validating message part size")
-
-		if eventSize <= maxEventSize {
-			// This part fits, add it
-			validatedParts = append(validatedParts, part)
-		} else if maxSize <= MinMessageSize {
-			// We've hit minimum size but still too large - truncate with notice
-			log.Warn().
-				Int("part_size", len(part)).
-				Int("html_size", len(rendered.FormattedBody)).
-				Int("event_size", eventSize).
-				Msg("Message part exceeds Matrix limit even at minimum split size, truncating")
-
-			truncated := truncateToFit(part, maxEventSize)
-			validatedParts = append(validatedParts, truncated)
-		} else {
-			// Part is too large, recursively split smaller
-			smallerSize := maxSize / 2
-			if smallerSize < MinMessageSize {
-				smallerSize = MinMessageSize
-			}
-			log.Debug().
-				Int("part_size", len(part)).
-				Int("html_size", len(rendered.FormattedBody)).
-				Int("event_size", eventSize).
-				Int("new_max_size", smallerSize).
-				Msg("Message part too large after HTML rendering, splitting smaller")
-
-			subParts := splitMessageWithValidation(part, smallerSize, maxEventSize, log)
-			validatedParts = append(validatedParts, subParts...)
-		}
+	_, err := ghost.Intent.SendMessage(ctx, portal.MXID, event.EventMessage, &event.Content{
+		Parsed: content,
+	}, nil)
+	if err != nil {
+		c.Connector.Log.Error().Err(err).Msg("Failed to send size error notice")
 	}
-
-	return validatedParts
-}
-
-// truncateToFit truncates text to fit within the Matrix event size limit.
-// It adds a notice that content was truncated.
-func truncateToFit(text string, maxEventSize int) string {
-	const truncationNotice = "\n\n⚠️ *[Message truncated due to size limits]*"
-
-	// Binary search for the right size
-	// We need: len(truncated) + len(rendered_html) <= maxEventSize
-	// Start with a conservative estimate
-	targetSize := maxEventSize / 4 // Assume up to 4x HTML expansion
-
-	for targetSize > 100 {
-		candidate := text
-		if len(text) > targetSize {
-			// Find a good break point
-			breakPoint := findSplitPoint(text, targetSize)
-			candidate = strings.TrimSpace(text[:breakPoint]) + truncationNotice
-		}
-
-		rendered := format.RenderMarkdown(candidate, true, true)
-		eventSize := len(candidate) + len(rendered.FormattedBody)
-
-		if eventSize <= maxEventSize {
-			return candidate
-		}
-
-		// Still too large, try smaller
-		targetSize = targetSize * 3 / 4
-	}
-
-	// Absolute fallback - just return the notice
-	return "⚠️ *[Message could not be delivered due to size limits. Please check logs.]*"
 }
 
 // splitMessage splits a message into chunks that fit within the size limit.

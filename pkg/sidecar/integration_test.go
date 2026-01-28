@@ -171,7 +171,7 @@ func TestIntegrationRetryBehavior(t *testing.T) {
 	log := zerolog.Nop()
 	client := NewClient(server.URL, 30*time.Second, log)
 
-	resp, err := client.Chat(context.Background(), "test-portal", "", "", "test message", nil, nil)
+	resp, err := client.Chat(context.Background(), "test-portal", "", "", "test message", "", nil, nil)
 	if err != nil {
 		t.Fatalf("Expected success after retries, got error: %v", err)
 	}
@@ -202,11 +202,11 @@ func TestIntegrationCircuitBreaker(t *testing.T) {
 
 	// Make requests until circuit opens
 	for i := 0; i < 10; i++ {
-		_, _ = client.Chat(context.Background(), "test", "", "", "message", nil, nil)
+		_, _ = client.Chat(context.Background(), "test", "", "", "message", "", nil, nil)
 	}
 
 	// After many failures, circuit should be open
-	_, err := client.Chat(context.Background(), "test", "", "", "message", nil, nil)
+	_, err := client.Chat(context.Background(), "test", "", "", "message", "", nil, nil)
 	if err == nil || err.Error() != "circuit breaker open: sidecar temporarily unavailable" {
 		// Circuit might not be open yet depending on timing, but we should have errors
 		t.Logf("Circuit breaker state: %v", err)
@@ -316,7 +316,7 @@ func TestIntegrationContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err := client.Chat(ctx, "test", "", "", "message", nil, nil)
+	_, err := client.Chat(ctx, "test", "", "", "message", "", nil, nil)
 	if err == nil {
 		t.Error("Expected error due to context cancellation")
 	}
