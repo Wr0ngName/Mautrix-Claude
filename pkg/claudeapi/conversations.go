@@ -417,25 +417,6 @@ func (cm *ConversationManager) estimatedTokensLocked() int {
 	return totalChars / ApproxCharsPerToken
 }
 
-// GetCompactionPrompt returns a prompt for Claude to summarize the conversation.
-// This follows Claude 4 best practices for context management.
-func (cm *ConversationManager) GetCompactionPrompt() string {
-	return `You are being asked to create a concise summary of the conversation so far.
-This summary will replace the full conversation history to manage context limits.
-
-Create a summary that:
-1. Preserves all important context, decisions, and key information discussed
-2. Maintains the essential flow and topics of the conversation
-3. Notes any specific user preferences or requirements mentioned
-4. Keeps track of any ongoing tasks or open questions
-5. Is written from a neutral perspective (not as "I" the assistant)
-
-Format your summary as a clear, structured recap that another instance of Claude
-could use to continue the conversation seamlessly. Be thorough but concise.
-
-Respond ONLY with the summary, no preamble or explanation.`
-}
-
 // GetMessagesForCompaction returns all messages formatted for the compaction request.
 func (cm *ConversationManager) GetMessagesForCompaction() string {
 	cm.mu.RLock()
