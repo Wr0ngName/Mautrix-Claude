@@ -79,9 +79,9 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			sessionID = sid
 		}
 
-		// Extract message text from request
-		messageText := extractMessageText(req.Messages)
-		if messageText == "" {
+		// Extract message content (text and images) from request
+		messageText, messageContent := extractMessageContent(req.Messages)
+		if messageText == "" && len(messageContent) == 0 {
 			m.metrics.FailedRequests.Add(1)
 			sendEvent(claudeapi.StreamEvent{
 				Type: "error",
@@ -91,6 +91,18 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 				},
 			})
 			return
+		}
+
+		// Log if images are being sent
+		hasImages := len(messageContent) > 0
+		if hasImages {
+			imageCount := 0
+			for _, c := range messageContent {
+				if c.Type == "image" {
+					imageCount++
+				}
+			}
+			m.log.Debug().Int("image_count", imageCount).Msg("Sending message with images to sidecar")
 		}
 
 		// Send message_start event
@@ -115,7 +127,8 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 			model = &req.Model
 		}
 
-		resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, sessionID, systemPrompt, model)
+		// Use ChatWithContent to support images
+		resp, err := m.client.ChatWithContent(ctx, portalID, userID, credentialsJSON, messageText, messageContent, sessionID, systemPrompt, model)
 		if err != nil {
 			m.metrics.FailedRequests.Add(1)
 			// Check if it was a context cancellation
@@ -208,9 +221,9 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 		credentialsJSON = creds
 	}
 
-	// Extract message text
-	messageText := extractMessageText(req.Messages)
-	if messageText == "" {
+	// Extract message content (text and images)
+	messageText, messageContent := extractMessageContent(req.Messages)
+	if messageText == "" && len(messageContent) == 0 {
 		m.metrics.FailedRequests.Add(1)
 		return nil, fmt.Errorf("empty message")
 	}
@@ -231,7 +244,8 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 		model = &req.Model
 	}
 
-	resp, err := m.client.Chat(ctx, portalID, userID, credentialsJSON, messageText, sessionID, systemPrompt, model)
+	// Use ChatWithContent to support images
+	resp, err := m.client.ChatWithContent(ctx, portalID, userID, credentialsJSON, messageText, messageContent, sessionID, systemPrompt, model)
 	if err != nil {
 		m.metrics.FailedRequests.Add(1)
 		return nil, err
@@ -353,18 +367,65 @@ func WithSessionID(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sessionIDKey, sessionID)
 }
 
-// extractMessageText extracts the text content from the last user message.
-func extractMessageText(messages []claudeapi.Message) string {
+// extractMessageContent extracts text and structured content from the last user message.
+// Returns the text content (for backward compatibility) and structured content blocks (for images).
+// If there are images, content will be non-nil.
+func extractMessageContent(messages []claudeapi.Message) (text string, content []ContentBlock) {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" {
-			for _, content := range messages[i].Content {
-				if content.Type == "text" && content.Text != "" {
-					return content.Text
+			var textParts []string
+			var hasImages bool
+
+			for _, c := range messages[i].Content {
+				switch c.Type {
+				case "text":
+					if c.Text != "" {
+						textParts = append(textParts, c.Text)
+						content = append(content, ContentBlock{
+							Type: "text",
+							Text: c.Text,
+						})
+					}
+				case "image":
+					if c.Source != nil {
+						hasImages = true
+						content = append(content, ContentBlock{
+							Type: "image",
+							Source: &ImageSource{
+								Type:      c.Source.Type,
+								MediaType: c.Source.MediaType,
+								Data:      c.Source.Data,
+							},
+						})
+					}
 				}
 			}
+
+			// Combine text parts
+			if len(textParts) > 0 {
+				text = textParts[0]
+				for i := 1; i < len(textParts); i++ {
+					text += "\n" + textParts[i]
+				}
+			}
+
+			// Only return content if there are images (for backward compatibility)
+			// Text-only messages will use the simple Message field
+			if !hasImages {
+				content = nil
+			}
+
+			return text, content
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// extractMessageText extracts the text content from the last user message.
+// Deprecated: Use extractMessageContent for multimodal support.
+func extractMessageText(messages []claudeapi.Message) string {
+	text, _ := extractMessageContent(messages)
+	return text
 }
 
 // estimateTokens provides a rough estimate of token count.

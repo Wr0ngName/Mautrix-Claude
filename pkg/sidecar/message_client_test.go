@@ -666,6 +666,253 @@ func TestExtractMessageText(t *testing.T) {
 	}
 }
 
+func TestExtractMessageContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		messages    []claudeapi.Message
+		wantText    string
+		wantContent []ContentBlock
+	}{
+		{
+			name: "text only - no content returned",
+			messages: []claudeapi.Message{
+				{
+					Role: "user",
+					Content: []claudeapi.Content{
+						{Type: "text", Text: "Hello world"},
+					},
+				},
+			},
+			wantText:    "Hello world",
+			wantContent: nil, // No content for text-only (backward compat)
+		},
+		{
+			name: "image only",
+			messages: []claudeapi.Message{
+				{
+					Role: "user",
+					Content: []claudeapi.Content{
+						{
+							Type: "image",
+							Source: &claudeapi.ImageSource{
+								Type:      "base64",
+								MediaType: "image/jpeg",
+								Data:      "base64data",
+							},
+						},
+					},
+				},
+			},
+			wantText: "",
+			wantContent: []ContentBlock{
+				{
+					Type: "image",
+					Source: &ImageSource{
+						Type:      "base64",
+						MediaType: "image/jpeg",
+						Data:      "base64data",
+					},
+				},
+			},
+		},
+		{
+			name: "image with text caption",
+			messages: []claudeapi.Message{
+				{
+					Role: "user",
+					Content: []claudeapi.Content{
+						{
+							Type: "image",
+							Source: &claudeapi.ImageSource{
+								Type:      "base64",
+								MediaType: "image/png",
+								Data:      "pngdata",
+							},
+						},
+						{Type: "text", Text: "What's in this image?"},
+					},
+				},
+			},
+			wantText: "What's in this image?",
+			wantContent: []ContentBlock{
+				{
+					Type: "image",
+					Source: &ImageSource{
+						Type:      "base64",
+						MediaType: "image/png",
+						Data:      "pngdata",
+					},
+				},
+				{
+					Type: "text",
+					Text: "What's in this image?",
+				},
+			},
+		},
+		{
+			name: "multiple images with text",
+			messages: []claudeapi.Message{
+				{
+					Role: "user",
+					Content: []claudeapi.Content{
+						{
+							Type: "image",
+							Source: &claudeapi.ImageSource{
+								Type:      "base64",
+								MediaType: "image/jpeg",
+								Data:      "img1data",
+							},
+						},
+						{
+							Type: "image",
+							Source: &claudeapi.ImageSource{
+								Type:      "base64",
+								MediaType: "image/jpeg",
+								Data:      "img2data",
+							},
+						},
+						{Type: "text", Text: "Compare these two"},
+					},
+				},
+			},
+			wantText: "Compare these two",
+			wantContent: []ContentBlock{
+				{
+					Type: "image",
+					Source: &ImageSource{
+						Type:      "base64",
+						MediaType: "image/jpeg",
+						Data:      "img1data",
+					},
+				},
+				{
+					Type: "image",
+					Source: &ImageSource{
+						Type:      "base64",
+						MediaType: "image/jpeg",
+						Data:      "img2data",
+					},
+				},
+				{
+					Type: "text",
+					Text: "Compare these two",
+				},
+			},
+		},
+		{
+			name: "image with nil source - ignored",
+			messages: []claudeapi.Message{
+				{
+					Role: "user",
+					Content: []claudeapi.Content{
+						{Type: "image", Source: nil},
+						{Type: "text", Text: "Some text"},
+					},
+				},
+			},
+			wantText:    "Some text",
+			wantContent: nil, // No valid images, so nil content
+		},
+		{
+			name: "empty message",
+			messages: []claudeapi.Message{
+				{
+					Role:    "user",
+					Content: []claudeapi.Content{},
+				},
+			},
+			wantText:    "",
+			wantContent: nil,
+		},
+		{
+			name: "multiple text blocks",
+			messages: []claudeapi.Message{
+				{
+					Role: "user",
+					Content: []claudeapi.Content{
+						{Type: "text", Text: "First part"},
+						{Type: "text", Text: "Second part"},
+					},
+				},
+			},
+			wantText:    "First part\nSecond part",
+			wantContent: nil, // No images, so nil content
+		},
+		{
+			name: "text and image with multiple text blocks",
+			messages: []claudeapi.Message{
+				{
+					Role: "user",
+					Content: []claudeapi.Content{
+						{Type: "text", Text: "Look at this:"},
+						{
+							Type: "image",
+							Source: &claudeapi.ImageSource{
+								Type:      "base64",
+								MediaType: "image/gif",
+								Data:      "gifdata",
+							},
+						},
+						{Type: "text", Text: "And tell me what it shows"},
+					},
+				},
+			},
+			wantText: "Look at this:\nAnd tell me what it shows",
+			wantContent: []ContentBlock{
+				{Type: "text", Text: "Look at this:"},
+				{
+					Type: "image",
+					Source: &ImageSource{
+						Type:      "base64",
+						MediaType: "image/gif",
+						Data:      "gifdata",
+					},
+				},
+				{Type: "text", Text: "And tell me what it shows"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotText, gotContent := extractMessageContent(tt.messages)
+
+			if gotText != tt.wantText {
+				t.Errorf("extractMessageContent() text = %q, want %q", gotText, tt.wantText)
+			}
+
+			if len(gotContent) != len(tt.wantContent) {
+				t.Errorf("extractMessageContent() content length = %d, want %d", len(gotContent), len(tt.wantContent))
+				return
+			}
+
+			for i, got := range gotContent {
+				want := tt.wantContent[i]
+				if got.Type != want.Type {
+					t.Errorf("content[%d].Type = %q, want %q", i, got.Type, want.Type)
+				}
+				if got.Text != want.Text {
+					t.Errorf("content[%d].Text = %q, want %q", i, got.Text, want.Text)
+				}
+				if (got.Source == nil) != (want.Source == nil) {
+					t.Errorf("content[%d].Source nil mismatch", i)
+				}
+				if got.Source != nil && want.Source != nil {
+					if got.Source.Type != want.Source.Type {
+						t.Errorf("content[%d].Source.Type = %q, want %q", i, got.Source.Type, want.Source.Type)
+					}
+					if got.Source.MediaType != want.Source.MediaType {
+						t.Errorf("content[%d].Source.MediaType = %q, want %q", i, got.Source.MediaType, want.Source.MediaType)
+					}
+					if got.Source.Data != want.Source.Data {
+						t.Errorf("content[%d].Source.Data = %q, want %q", i, got.Source.Data, want.Source.Data)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestEstimateTokens(t *testing.T) {
 	tests := []struct {
 		name string

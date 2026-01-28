@@ -34,7 +34,7 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 from starlette.responses import Response
 
 # Agent SDK imports
-from claude_agent_sdk import query, ClaudeAgentOptions
+from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, ResultMessage, TextBlock
 
 # Configure logging
 logging.basicConfig(
@@ -169,16 +169,37 @@ class Session:
     last_compaction_time: Optional[float] = None
 
 
+class ImageSource(BaseModel):
+    """Image source for multimodal messages."""
+    type: str  # "base64"
+    media_type: str  # "image/jpeg", "image/png", etc.
+    data: str  # Base64-encoded image data
+
+
+class ContentBlock(BaseModel):
+    """Content block for multimodal messages."""
+    type: str  # "text" or "image"
+    text: Optional[str] = None  # For text blocks
+    source: Optional[ImageSource] = None  # For image blocks
+
+
 class ChatRequest(BaseModel):
     """Request body for chat endpoint."""
     portal_id: str
     user_id: Optional[str] = None  # Matrix user ID for per-user sessions
     credentials_json: Optional[str] = None  # User's Claude credentials JSON
-    message: str
+    message: str  # Text-only message (backward compat)
+    content: Optional[list[ContentBlock]] = None  # Structured content with images (multimodal)
     system_prompt: Optional[str] = None
     model: Optional[str] = None
     session_id: Optional[str] = None  # Agent SDK session ID for resume (stored in bridge DB)
     stream: bool = False
+
+    def has_images(self) -> bool:
+        """Check if this request contains images."""
+        if not self.content:
+            return False
+        return any(block.type == "image" for block in self.content)
 
     def validate_input(self) -> None:
         """Validate input fields. Raises HTTPException on invalid input."""
@@ -194,10 +215,12 @@ class ChatRequest(BaseModel):
                 status_code=400,
                 detail="Invalid portal_id: contains invalid characters"
             )
-        # Validate message
-        if not self.message:
+        # Validate message - either text message or content blocks required
+        has_text = bool(self.message)
+        has_content = bool(self.content and len(self.content) > 0)
+        if not has_text and not has_content:
             raise HTTPException(status_code=400, detail="Message cannot be empty")
-        if len(self.message) > MAX_MESSAGE_LENGTH:
+        if has_text and len(self.message) > MAX_MESSAGE_LENGTH:
             raise HTTPException(
                 status_code=400,
                 detail=f"Message too long: {len(self.message)} chars (max {MAX_MESSAGE_LENGTH})"
@@ -714,6 +737,122 @@ class QueryResult:
     compacted: bool = False
 
 
+def _build_multimodal_content(content_blocks: list[ContentBlock]) -> list[dict]:
+    """
+    Build multimodal content blocks for Agent SDK streaming input.
+
+    Converts our ContentBlock model to the format expected by ClaudeSDKClient:
+    - Text: {"type": "text", "text": "..."}
+    - Image: {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
+    """
+    result = []
+    for block in content_blocks:
+        if block.type == "text" and block.text:
+            result.append({
+                "type": "text",
+                "text": block.text
+            })
+        elif block.type == "image" and block.source:
+            result.append({
+                "type": "image",
+                "source": {
+                    "type": block.source.type,
+                    "media_type": block.source.media_type,
+                    "data": block.source.data
+                }
+            })
+    return result
+
+
+async def _run_multimodal_query_with_timeout(
+    content_blocks: list[ContentBlock],
+    options: ClaudeAgentOptions,
+    timeout_seconds: int,
+    portal_id: str,
+) -> QueryResult:
+    """
+    Run a multimodal query (with images) using ClaudeSDKClient streaming input.
+
+    This uses the ClaudeSDKClient with an async generator to support image uploads,
+    as the simple query() function doesn't support multimodal content.
+
+    Returns QueryResult with response, session_id, and detailed token usage.
+    Raises TimeoutError if the query takes too long.
+    """
+    result = QueryResult()
+
+    # Build the multimodal content structure
+    content = _build_multimodal_content(content_blocks)
+
+    # Count images for logging
+    image_count = sum(1 for b in content_blocks if b.type == "image")
+    logger.info(f"Running multimodal query for portal {portal_id} with {image_count} image(s)")
+
+    async def message_generator():
+        """Generate a single message with multimodal content."""
+        yield {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": content
+            }
+        }
+
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            async with ClaudeSDKClient(options) as client:
+                # Send the multimodal message
+                await client.query(message_generator())
+
+                # Process responses
+                async for message in client.receive_response():
+                    # Capture session ID from SystemMessage init
+                    if hasattr(message, 'subtype') and message.subtype == 'init':
+                        if hasattr(message, 'data') and 'session_id' in message.data:
+                            result.session_id = message.data['session_id']
+                            logger.debug(f"Got session_id from Agent SDK: {result.session_id}")
+
+                    # Detect compaction events
+                    if hasattr(message, 'subtype') and message.subtype == 'compact':
+                        result.compacted = True
+                        logger.info(f"Context compaction occurred for portal {portal_id}")
+
+                    # Capture result from ResultMessage
+                    if isinstance(message, ResultMessage):
+                        if message.result:
+                            result.response_text = message.result
+                        # Capture token usage
+                        if message.usage:
+                            usage = message.usage
+                            if isinstance(usage, dict):
+                                result.input_tokens += usage.get('input_tokens', 0)
+                                result.output_tokens += usage.get('output_tokens', 0)
+                                result.cache_creation_tokens += usage.get('cache_creation_input_tokens', 0)
+                                result.cache_read_tokens += usage.get('cache_read_input_tokens', 0)
+
+                    # Also capture text from AssistantMessage content blocks
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                # Accumulate text (result may come in parts)
+                                if not result.response_text:
+                                    result.response_text = block.text
+                                else:
+                                    result.response_text += block.text
+
+        # Update Prometheus metrics
+        if result.input_tokens > 0:
+            TOKENS_USED.labels(type='input').inc(result.input_tokens)
+        if result.output_tokens > 0:
+            TOKENS_USED.labels(type='output').inc(result.output_tokens)
+
+    except asyncio.TimeoutError:
+        logger.error(f"Multimodal query timed out after {timeout_seconds}s for portal {portal_id}")
+        raise
+
+    return result
+
+
 async def _run_query_with_timeout(
     prompt: str,
     options: ClaudeAgentOptions,
@@ -846,24 +985,45 @@ async def chat(request: ChatRequest):
             # If resume fails/times out, retry without session_id
             query_result: QueryResult
 
+            # Check if we have images - use multimodal query if so
+            has_images = request.has_images()
+
             try:
-                query_result = await _run_query_with_timeout(
-                    prompt=request.message,
-                    options=options,
-                    timeout_seconds=QUERY_TIMEOUT,
-                    portal_id=request.portal_id,
-                )
-            except asyncio.TimeoutError:
-                # If we were trying to resume a session and it timed out, retry without resume
-                if session_id_to_use:
-                    logger.warning(f"Session resume timed out for {request.portal_id}, retrying without session_id")
-                    options.resume = None
+                if has_images and request.content:
+                    # Use ClaudeSDKClient with streaming input for images
+                    query_result = await _run_multimodal_query_with_timeout(
+                        content_blocks=request.content,
+                        options=options,
+                        timeout_seconds=QUERY_TIMEOUT,
+                        portal_id=request.portal_id,
+                    )
+                else:
+                    # Use simple query() for text-only messages
                     query_result = await _run_query_with_timeout(
                         prompt=request.message,
                         options=options,
                         timeout_seconds=QUERY_TIMEOUT,
                         portal_id=request.portal_id,
                     )
+            except asyncio.TimeoutError:
+                # If we were trying to resume a session and it timed out, retry without resume
+                if session_id_to_use:
+                    logger.warning(f"Session resume timed out for {request.portal_id}, retrying without session_id")
+                    options.resume = None
+                    if has_images and request.content:
+                        query_result = await _run_multimodal_query_with_timeout(
+                            content_blocks=request.content,
+                            options=options,
+                            timeout_seconds=QUERY_TIMEOUT,
+                            portal_id=request.portal_id,
+                        )
+                    else:
+                        query_result = await _run_query_with_timeout(
+                            prompt=request.message,
+                            options=options,
+                            timeout_seconds=QUERY_TIMEOUT,
+                            portal_id=request.portal_id,
+                        )
                 else:
                     # No session to retry without, propagate the timeout
                     raise HTTPException(

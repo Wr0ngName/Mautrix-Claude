@@ -72,16 +72,31 @@ type Client struct {
 	lastFailTime     time.Time
 }
 
+// ContentBlock represents a content block (text or image) for multimodal messages.
+type ContentBlock struct {
+	Type   string       `json:"type"`             // "text" or "image"
+	Text   string       `json:"text,omitempty"`   // For text blocks
+	Source *ImageSource `json:"source,omitempty"` // For image blocks
+}
+
+// ImageSource represents an image source for multimodal messages.
+type ImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // "image/jpeg", "image/png", etc.
+	Data      string `json:"data"`       // Base64-encoded image data
+}
+
 // ChatRequest is the request body for the chat endpoint.
 type ChatRequest struct {
-	PortalID        string  `json:"portal_id"`
-	UserID          string  `json:"user_id,omitempty"`          // Matrix user ID for per-user sessions
-	CredentialsJSON string  `json:"credentials_json,omitempty"` // User's Claude credentials for Pro/Max
-	Message         string  `json:"message"`
-	SystemPrompt    *string `json:"system_prompt,omitempty"`
-	Model           *string `json:"model,omitempty"`
-	SessionID       string  `json:"session_id,omitempty"` // Agent SDK session ID for resume (from bridge DB)
-	Stream          bool    `json:"stream"`
+	PortalID        string         `json:"portal_id"`
+	UserID          string         `json:"user_id,omitempty"`          // Matrix user ID for per-user sessions
+	CredentialsJSON string         `json:"credentials_json,omitempty"` // User's Claude credentials for Pro/Max
+	Message         string         `json:"message"`                    // Text-only message (backward compat)
+	Content         []ContentBlock `json:"content,omitempty"`          // Structured content with images (multimodal)
+	SystemPrompt    *string        `json:"system_prompt,omitempty"`
+	Model           *string        `json:"model,omitempty"`
+	SessionID       string         `json:"session_id,omitempty"` // Agent SDK session ID for resume (from bridge DB)
+	Stream          bool           `json:"stream"`
 }
 
 // ChatResponse is the response body from the chat endpoint.
@@ -376,6 +391,13 @@ func (c *Client) OAuthComplete(ctx context.Context, userID, state, code string) 
 // Includes retry logic with exponential backoff and circuit breaker protection.
 // sessionID is the Agent SDK session ID for resuming conversations (stored in bridge DB).
 func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, message, sessionID string, systemPrompt, model *string) (*ChatResponse, error) {
+	return c.ChatWithContent(ctx, portalID, userID, credentialsJSON, message, nil, sessionID, systemPrompt, model)
+}
+
+// ChatWithContent sends a message to Claude with optional structured content (for images).
+// If content is nil or empty, falls back to text-only message mode.
+// sessionID is the Agent SDK session ID for resuming conversations (stored in bridge DB).
+func (c *Client) ChatWithContent(ctx context.Context, portalID, userID, credentialsJSON, message string, content []ContentBlock, sessionID string, systemPrompt, model *string) (*ChatResponse, error) {
 	// Check circuit breaker
 	if !c.checkCircuit() {
 		return nil, fmt.Errorf("circuit breaker open: sidecar temporarily unavailable")
@@ -386,6 +408,7 @@ func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, me
 		UserID:          userID,
 		CredentialsJSON: credentialsJSON,
 		Message:         message,
+		Content:         content, // May be nil for text-only
 		SystemPrompt:    systemPrompt,
 		Model:           model,
 		SessionID:       sessionID,
