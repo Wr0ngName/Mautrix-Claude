@@ -102,8 +102,8 @@ type recentMention struct {
 }
 
 // recentMentionWindow is how long after a mention we still process images from that user.
-// Set to 1 second since captions and images arrive almost simultaneously from Matrix.
-const recentMentionWindow = 1 * time.Second
+// Set to 5 seconds to allow for network delays. Only 1 image is allowed per mention.
+const recentMentionWindow = 5 * time.Second
 
 // ClaudeClient represents a client connection to Claude (API or Web).
 type ClaudeClient struct {
