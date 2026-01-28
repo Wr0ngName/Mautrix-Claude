@@ -564,7 +564,18 @@ func (c *ClaudeConnector) cmdStats(ce *commands.Event) {
 			sb.WriteString("\n")
 		}
 	} else {
+		// API mode stats
 		sb.WriteString(fmt.Sprintf("**Estimated tokens:** ~%d\n", outputTokens))
+
+		// Show API mode compaction and context usage from conversation manager
+		_, estTokens, maxTokens, apiCompactionCount, _ := client.GetConversationFullStats(ce.Portal.PortalKey.ID)
+		if apiCompactionCount > 0 {
+			sb.WriteString(fmt.Sprintf("**Context compactions:** %d\n", apiCompactionCount))
+		}
+		if maxTokens > 0 && estTokens > 0 {
+			usagePercent := (estTokens * 100) / maxTokens
+			sb.WriteString(fmt.Sprintf("**Context usage:** ~%d%% of %dk limit\n", usagePercent, maxTokens/1000))
+		}
 	}
 
 	if !lastUsed.IsZero() {

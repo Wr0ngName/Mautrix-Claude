@@ -39,6 +39,10 @@ type CreateMessageRequest struct {
 	System      string                 `json:"system,omitempty"`
 	Stream      bool                   `json:"stream,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	// EnableCaching enables prompt caching for the system prompt and conversation history.
+	// This adds cache_control markers to reduce costs on repeated context.
+	// Only enable from the 2nd message to avoid 25% cache write overhead on single questions.
+	EnableCaching bool `json:"-"`
 }
 
 // CreateMessageResponse represents a response from creating a message.

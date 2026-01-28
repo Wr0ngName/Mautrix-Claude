@@ -49,16 +49,29 @@ func (c *Client) Validate(ctx context.Context) error {
 func (c *Client) CreateMessage(ctx context.Context, req *CreateMessageRequest) (*CreateMessageResponse, error) {
 	startTime := time.Now()
 
-	// Convert our request to SDK format
+	// Convert our request to SDK format with optional caching
 	sdkParams := anthropic.MessageNewParams{
 		Model:     anthropic.Model(req.Model),
 		MaxTokens: int64(req.MaxTokens),
-		Messages:  convertMessagesToSDK(req.Messages),
+		Messages:  convertMessagesToSDKWithCache(req.Messages, req.EnableCaching),
 	}
 
 	if req.System != "" {
-		sdkParams.System = []anthropic.TextBlockParam{
-			{Text: req.System},
+		if req.EnableCaching {
+			// Add cache control to system prompt
+			sdkParams.System = []anthropic.TextBlockParam{
+				{
+					Text: req.System,
+					CacheControl: anthropic.CacheControlEphemeralParam{
+						Type: "ephemeral",
+						TTL:  anthropic.CacheControlEphemeralTTLTTL5m,
+					},
+				},
+			}
+		} else {
+			sdkParams.System = []anthropic.TextBlockParam{
+				{Text: req.System},
+			}
 		}
 	}
 
@@ -69,6 +82,7 @@ func (c *Client) CreateMessage(ctx context.Context, req *CreateMessageRequest) (
 	c.Log.Debug().
 		Str("model", req.Model).
 		Int("max_tokens", req.MaxTokens).
+		Bool("caching", req.EnableCaching).
 		Msg("Sending message to Claude API")
 
 	resp, err := c.sdk.Messages.New(ctx, sdkParams)
@@ -91,16 +105,29 @@ func (c *Client) CreateMessage(ctx context.Context, req *CreateMessageRequest) (
 
 // CreateMessageStream creates a new message with streaming.
 func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequest) (<-chan StreamEvent, error) {
-	// Convert our request to SDK format
+	// Convert our request to SDK format with optional caching
 	sdkParams := anthropic.MessageNewParams{
 		Model:     anthropic.Model(req.Model),
 		MaxTokens: int64(req.MaxTokens),
-		Messages:  convertMessagesToSDK(req.Messages),
+		Messages:  convertMessagesToSDKWithCache(req.Messages, req.EnableCaching),
 	}
 
 	if req.System != "" {
-		sdkParams.System = []anthropic.TextBlockParam{
-			{Text: req.System},
+		if req.EnableCaching {
+			// Add cache control to system prompt
+			sdkParams.System = []anthropic.TextBlockParam{
+				{
+					Text: req.System,
+					CacheControl: anthropic.CacheControlEphemeralParam{
+						Type: "ephemeral",
+						TTL:  anthropic.CacheControlEphemeralTTLTTL5m,
+					},
+				},
+			}
+		} else {
+			sdkParams.System = []anthropic.TextBlockParam{
+				{Text: req.System},
+			}
 		}
 	}
 
@@ -111,6 +138,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 	c.Log.Debug().
 		Str("model", req.Model).
 		Int("max_tokens", req.MaxTokens).
+		Bool("caching", req.EnableCaching).
 		Msg("Starting streaming message to Claude API")
 
 	stream := c.sdk.Messages.NewStreaming(ctx, sdkParams)
@@ -230,17 +258,90 @@ func (c *Client) GetMetrics() *Metrics {
 	return c.Metrics
 }
 
+// CompactConversation calls Claude to generate a summary of the conversation for compaction.
+// Returns the summary text that can be used to replace the conversation history.
+func (c *Client) CompactConversation(ctx context.Context, model string, conversationText string) (string, error) {
+	compactionPrompt := `You are being asked to create a concise summary of the conversation so far.
+This summary will replace the full conversation history to manage context limits.
+
+Create a summary that:
+1. Preserves all important context, decisions, and key information discussed
+2. Maintains the essential flow and topics of the conversation
+3. Notes any specific user preferences or requirements mentioned
+4. Keeps track of any ongoing tasks or open questions
+5. Is written from a neutral perspective (not as "I" the assistant)
+
+Format your summary as a clear, structured recap that another instance of Claude
+could use to continue the conversation seamlessly. Be thorough but concise.
+
+Respond ONLY with the summary, no preamble or explanation.
+
+Here is the conversation to summarize:
+
+` + conversationText
+
+	resp, err := c.CreateMessage(ctx, &CreateMessageRequest{
+		Model:     model,
+		MaxTokens: 4096, // Enough for a detailed summary
+		Messages: []Message{
+			{
+				Role: "user",
+				Content: []Content{
+					{Type: "text", Text: compactionPrompt},
+				},
+			},
+		},
+		Temperature: 0.3, // Low temperature for consistent summaries
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to generate compaction summary: %w", err)
+	}
+
+	// Extract summary from response
+	for _, content := range resp.Content {
+		if content.Type == "text" && content.Text != "" {
+			return content.Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no summary in compaction response")
+}
+
 // convertMessagesToSDK converts our message format to SDK format.
 func convertMessagesToSDK(messages []Message) []anthropic.MessageParam {
+	return convertMessagesToSDKWithCache(messages, false)
+}
+
+// convertMessagesToSDKWithCache converts our message format to SDK format with optional caching.
+// When enableCaching is true, cache_control is added to all messages except the last user message,
+// since those form the stable prefix that can be cached.
+func convertMessagesToSDKWithCache(messages []Message, enableCaching bool) []anthropic.MessageParam {
 	result := make([]anthropic.MessageParam, 0, len(messages))
 
-	for _, msg := range messages {
+	for i, msg := range messages {
 		var blocks []anthropic.ContentBlockParamUnion
+
+		// Enable caching for all messages except the last one (which is the new user message)
+		// The last message changes each turn, so it shouldn't be cached
+		shouldCache := enableCaching && i < len(messages)-1
 
 		for _, content := range msg.Content {
 			switch content.Type {
 			case "text":
-				blocks = append(blocks, anthropic.NewTextBlock(content.Text))
+				if shouldCache {
+					// Add cache control to this text block
+					blocks = append(blocks, anthropic.ContentBlockParamUnion{
+						OfText: &anthropic.TextBlockParam{
+							Text: content.Text,
+							CacheControl: anthropic.CacheControlEphemeralParam{
+								Type: "ephemeral",
+								TTL:  anthropic.CacheControlEphemeralTTLTTL5m,
+							},
+						},
+					})
+				} else {
+					blocks = append(blocks, anthropic.NewTextBlock(content.Text))
+				}
 			case "image":
 				if content.Source != nil {
 					blocks = append(blocks, anthropic.NewImageBlockBase64(

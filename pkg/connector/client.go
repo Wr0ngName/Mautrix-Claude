@@ -556,22 +556,67 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	var messagesForAPI []claudeapi.Message
+	var enableCaching bool
+
 	if isSidecarMode {
 		// Sidecar handles conversation history via Agent SDK session resume
 		messagesForAPI = []claudeapi.Message{userMessage}
 	} else {
 		// API mode: include local conversation history
+		// Record first message time for caching window tracking
+		convMgr.RecordFirstMessage()
+
+		// Check if compaction is needed before adding new message
+		if convMgr.NeedsCompaction() {
+			c.Connector.Log.Info().
+				Int("estimated_tokens", convMgr.EstimatedTokens()).
+				Int("max_tokens", convMgr.GetMaxTokens()).
+				Int("compaction_count", convMgr.CompactionCount()).
+				Msg("Context approaching limit, triggering compaction")
+
+			// Get conversation text for summarization
+			conversationText := convMgr.GetMessagesForCompaction()
+
+			// Call Claude to generate a summary (using the direct API client)
+			if apiClient, ok := c.MessageClient.(*claudeapi.Client); ok {
+				summary, err := apiClient.CompactConversation(ctx, model, conversationText)
+				if err != nil {
+					c.Connector.Log.Error().Err(err).Msg("Failed to compact conversation, continuing with full history")
+				} else {
+					// Apply compaction, keeping the last 2 messages (most recent exchange)
+					convMgr.ApplyCompaction(summary, 2)
+					c.Connector.Log.Info().
+						Int("new_message_count", convMgr.MessageCount()).
+						Int("new_estimated_tokens", convMgr.EstimatedTokens()).
+						Msg("Conversation compacted successfully")
+
+					// Notify user that compaction occurred
+					c.sendCompactionNotice(ctx, msg.Portal)
+				}
+			}
+		}
+
 		existingMessages := convMgr.GetMessages()
 		messagesForAPI = append(existingMessages, userMessage)
+
+		// Enable caching if conditions are met (2nd+ message within 5 min window, enough tokens)
+		enableCaching = convMgr.ShouldEnableCaching()
+		if enableCaching {
+			c.Connector.Log.Debug().
+				Int("message_count", convMgr.MessageCount()).
+				Int("estimated_tokens", convMgr.EstimatedTokens()).
+				Msg("Enabling prompt caching for this request")
+		}
 	}
 
 	req := &claudeapi.CreateMessageRequest{
-		Model:       model,
-		Messages:    messagesForAPI,
-		MaxTokens:   c.Connector.Config.GetMaxTokens(),
-		Temperature: temperature,
-		System:      systemPrompt,
-		Stream:      true, // Use streaming for better UX
+		Model:         model,
+		Messages:      messagesForAPI,
+		MaxTokens:     c.Connector.Config.GetMaxTokens(),
+		Temperature:   temperature,
+		System:        systemPrompt,
+		Stream:        true, // Use streaming for better UX
+		EnableCaching: enableCaching,
 	}
 
 	// Send to Claude API (add portal ID context for sidecar session isolation)
@@ -811,6 +856,44 @@ func (c *ClaudeClient) formatUserFriendlyError(err error) error {
 	// Generic error - don't leak internal details to users
 	c.Connector.Log.Debug().Err(err).Msg("API error details")
 	return fmt.Errorf("failed to send message to Claude. Please try again later")
+}
+
+// sendCompactionNotice sends a notice to the Matrix room that context was compacted.
+func (c *ClaudeClient) sendCompactionNotice(ctx context.Context, portal *bridgev2.Portal) {
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+
+	notice := "ℹ️ Context limit approaching. Conversation history has been summarized to continue."
+
+	c.UserLogin.QueueRemoteEvent(&simplevent.Message[*MessageMetadata]{
+		EventMeta: simplevent.EventMeta{
+			Type: bridgev2.RemoteEventMessage,
+			LogContext: func(lc zerolog.Context) zerolog.Context {
+				return lc.Str("compaction_notice", "true")
+			},
+			PortalKey: portal.PortalKey,
+			Sender:    bridgev2.EventSender{Sender: c.Connector.MakeClaudeGhostID("system")},
+			Timestamp: time.Now(),
+		},
+		ID: networkid.MessageID(fmt.Sprintf("compaction_%d", time.Now().UnixNano())),
+		Data: &MessageMetadata{
+			ClaudeMessageID: "compaction",
+		},
+		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data *MessageMetadata) (*bridgev2.ConvertedMessage, error) {
+			return &bridgev2.ConvertedMessage{
+				Parts: []*bridgev2.ConvertedMessagePart{
+					{
+						Type: event.EventMessage,
+						Content: &event.MessageEventContent{
+							MsgType: event.MsgNotice,
+							Body:    notice,
+						},
+					},
+				},
+			}, nil
+		},
+	})
 }
 
 // sendErrorToRoom sends an error message to the Matrix room so the user knows what happened.
@@ -1196,6 +1279,18 @@ func (c *ClaudeClient) GetConversationStats(portalID networkid.PortalID) (messag
 		Msg("Conversation not found for portal")
 
 	return 0, 0, time.Time{}
+}
+
+// GetConversationFullStats returns full stats for a portal's conversation including compaction info.
+func (c *ClaudeClient) GetConversationFullStats(portalID networkid.PortalID) (messageCount, estimatedTokens, maxTokens, compactionCount int, isCompacted bool) {
+	c.convMu.RLock()
+	defer c.convMu.RUnlock()
+
+	if cm, ok := c.conversations[portalID]; ok {
+		return cm.MessageCount(), cm.EstimatedTokens(), cm.GetMaxTokens(), cm.CompactionCount(), cm.IsCompacted()
+	}
+
+	return 0, 0, 0, 0, false
 }
 
 // ResolveIdentifier resolves an identifier to start a new chat.

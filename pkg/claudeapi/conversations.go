@@ -28,13 +28,37 @@ type TrackedMessage struct {
 	ExternalID string // External ID (e.g., Matrix message ID)
 }
 
+// Compaction constants
+const (
+	// CompactionThresholdPercent is the percentage of max tokens that triggers compaction.
+	CompactionThresholdPercent = 75
+
+	// CompactionTargetPercent is the target percentage after compaction.
+	CompactionTargetPercent = 50
+
+	// CachingWindowDuration is how long after the first message to enable caching.
+	// Caching is only enabled from the 2nd message within this window to avoid
+	// the 25% cache write overhead on single questions.
+	CachingWindowDuration = 5 * time.Minute
+
+	// MinMessagesForCaching is the minimum number of messages before enabling caching.
+	MinMessagesForCaching = 2
+
+	// MinTokensForCaching is the minimum token threshold for caching to be worthwhile.
+	// Claude requires at least 1024 tokens for caching to work (2048 for Opus).
+	MinTokensForCaching = 1024
+)
+
 // ConversationManager manages conversation history and context.
 type ConversationManager struct {
-	messages   []TrackedMessage
-	maxTokens  int
-	mu         sync.RWMutex
-	createdAt  time.Time
-	lastUsedAt time.Time
+	messages       []TrackedMessage
+	maxTokens      int
+	mu             sync.RWMutex
+	createdAt      time.Time
+	lastUsedAt     time.Time
+	firstMessageAt time.Time     // When the first message was sent (for caching window)
+	compactionCount int          // Number of times the conversation was compacted
+	isCompacted    bool          // Whether the conversation has been compacted
 }
 
 // NewConversationManager creates a new conversation manager.
@@ -343,4 +367,181 @@ func (cm *ConversationManager) LastMessageRole() string {
 		return ""
 	}
 	return cm.messages[len(cm.messages)-1].Role
+}
+
+// ShouldEnableCaching returns true if prompt caching should be enabled.
+// Caching is enabled when:
+// 1. There are at least MinMessagesForCaching messages (to avoid overhead on single questions)
+// 2. The first message was within CachingWindowDuration (cache TTL is 5 min)
+// 3. Estimated tokens are at least MinTokensForCaching (Claude's minimum for caching)
+func (cm *ConversationManager) ShouldEnableCaching() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	// Need at least 2 messages (1 user + 1 assistant from previous turn)
+	if len(cm.messages) < MinMessagesForCaching {
+		return false
+	}
+
+	// Check if we're within the caching window
+	if cm.firstMessageAt.IsZero() || time.Since(cm.firstMessageAt) > CachingWindowDuration {
+		return false
+	}
+
+	// Check minimum token threshold
+	return cm.estimatedTokensLocked() >= MinTokensForCaching
+}
+
+// NeedsCompaction returns true if the conversation should be compacted.
+// This is triggered when estimated tokens exceed CompactionThresholdPercent of maxTokens.
+func (cm *ConversationManager) NeedsCompaction() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	if cm.maxTokens <= 0 {
+		return false
+	}
+
+	threshold := (cm.maxTokens * CompactionThresholdPercent) / 100
+	return cm.estimatedTokensLocked() >= threshold
+}
+
+// estimatedTokensLocked returns estimated tokens (caller must hold lock).
+func (cm *ConversationManager) estimatedTokensLocked() int {
+	totalChars := 0
+	for _, msg := range cm.messages {
+		for _, content := range msg.Content {
+			totalChars += len(content.Text)
+		}
+	}
+	return totalChars / ApproxCharsPerToken
+}
+
+// GetCompactionPrompt returns a prompt for Claude to summarize the conversation.
+// This follows Claude 4 best practices for context management.
+func (cm *ConversationManager) GetCompactionPrompt() string {
+	return `You are being asked to create a concise summary of the conversation so far.
+This summary will replace the full conversation history to manage context limits.
+
+Create a summary that:
+1. Preserves all important context, decisions, and key information discussed
+2. Maintains the essential flow and topics of the conversation
+3. Notes any specific user preferences or requirements mentioned
+4. Keeps track of any ongoing tasks or open questions
+5. Is written from a neutral perspective (not as "I" the assistant)
+
+Format your summary as a clear, structured recap that another instance of Claude
+could use to continue the conversation seamlessly. Be thorough but concise.
+
+Respond ONLY with the summary, no preamble or explanation.`
+}
+
+// GetMessagesForCompaction returns all messages formatted for the compaction request.
+func (cm *ConversationManager) GetMessagesForCompaction() string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	var result string
+	for _, msg := range cm.messages {
+		role := msg.Role
+		if role == "user" {
+			role = "User"
+		} else {
+			role = "Assistant"
+		}
+
+		for _, content := range msg.Content {
+			if content.Type == "text" && content.Text != "" {
+				result += fmt.Sprintf("[%s]: %s\n\n", role, content.Text)
+			}
+		}
+	}
+	return result
+}
+
+// ApplyCompaction replaces the conversation history with a summary.
+// The summary is stored as an assistant message, and the specified number of
+// recent messages are preserved after it.
+func (cm *ConversationManager) ApplyCompaction(summary string, keepRecentCount int) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	// Determine how many recent messages to keep
+	if keepRecentCount < 0 {
+		keepRecentCount = 0
+	}
+	if keepRecentCount > len(cm.messages) {
+		keepRecentCount = len(cm.messages)
+	}
+
+	// Get recent messages to preserve
+	var recentMessages []TrackedMessage
+	if keepRecentCount > 0 {
+		recentMessages = make([]TrackedMessage, keepRecentCount)
+		copy(recentMessages, cm.messages[len(cm.messages)-keepRecentCount:])
+	}
+
+	// Create the summary message as a "user" message (context for Claude)
+	// followed by "assistant" acknowledgment for proper turn alternation
+	summaryPrefix := "[CONVERSATION SUMMARY - Previous context has been compacted]\n\n"
+	summaryUserMsg := TrackedMessage{
+		Message: Message{
+			Role: "user",
+			Content: []Content{
+				{Type: "text", Text: summaryPrefix + summary + "\n\n[Please continue the conversation from here, using this summary as context.]"},
+			},
+		},
+		ExternalID: fmt.Sprintf("compaction_%d_user", cm.compactionCount+1),
+	}
+
+	summaryAsstMsg := TrackedMessage{
+		Message: Message{
+			Role: "assistant",
+			Content: []Content{
+				{Type: "text", Text: "I understand. I've reviewed the conversation summary and have full context of our previous discussion. I'm ready to continue helping you from where we left off."},
+			},
+		},
+		ExternalID: fmt.Sprintf("compaction_%d_assistant", cm.compactionCount+1),
+	}
+
+	// Build new message list: summary messages + recent messages
+	cm.messages = make([]TrackedMessage, 0, 2+len(recentMessages))
+	cm.messages = append(cm.messages, summaryUserMsg, summaryAsstMsg)
+	cm.messages = append(cm.messages, recentMessages...)
+
+	cm.compactionCount++
+	cm.isCompacted = true
+	cm.lastUsedAt = time.Now()
+}
+
+// CompactionCount returns how many times this conversation was compacted.
+func (cm *ConversationManager) CompactionCount() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.compactionCount
+}
+
+// IsCompacted returns whether the conversation has been compacted.
+func (cm *ConversationManager) IsCompacted() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.isCompacted
+}
+
+// RecordFirstMessage records when the first message was sent (for caching window).
+func (cm *ConversationManager) RecordFirstMessage() {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if cm.firstMessageAt.IsZero() {
+		cm.firstMessageAt = time.Now()
+	}
+}
+
+// ResetCachingWindow resets the caching window timer.
+// Call this when a new conversation burst starts after a long pause.
+func (cm *ConversationManager) ResetCachingWindow() {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.firstMessageAt = time.Now()
 }
