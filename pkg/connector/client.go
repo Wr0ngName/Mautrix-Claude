@@ -937,10 +937,13 @@ func (c *ClaudeClient) sendErrorToRoom(ctx context.Context, portal *bridgev2.Por
 // We start at 32KB and recursively split smaller if HTML expansion exceeds limits.
 const MaxMessageSize = 32000
 
-// MaxMatrixEventSize is the maximum safe size for a Matrix event.
-// Matrix has a ~64KB hard limit, but we use 55KB to leave room for
-// encryption overhead, event metadata, and safety margin.
-const MaxMatrixEventSize = 55000
+// MaxMatrixEventSize is the maximum safe size for body + formatted_body BEFORE encryption.
+// Matrix spec: unencrypted events max 65KB, but ENCRYPTED events max 49152 bytes (48KB).
+// Source: https://github.com/element-hq/element-web/issues/19330
+// Encryption overhead: base64 (~33% larger) + megolm metadata (~2KB)
+// Calculation: (X * 1.33) + 2000 < 49152 → X < 35450
+// Using 35KB to stay safely under the encrypted message limit.
+const MaxMatrixEventSize = 35000
 
 // MinMessageSize is the smallest we'll split to avoid infinite loops.
 // If a single chunk at this size still exceeds Matrix limits, we truncate.
@@ -1033,6 +1036,14 @@ func splitMessageWithValidation(text string, maxSize int, log zerolog.Logger) []
 		// Render to HTML and check total event size
 		rendered := format.RenderMarkdown(part, true, true)
 		eventSize := len(part) + len(rendered.FormattedBody) // body + formatted_body
+
+		log.Debug().
+			Int("part_size", len(part)).
+			Int("html_size", len(rendered.FormattedBody)).
+			Int("event_size", eventSize).
+			Int("max_event_size", MaxMatrixEventSize).
+			Bool("fits", eventSize <= MaxMatrixEventSize).
+			Msg("Validating message part size")
 
 		if eventSize <= MaxMatrixEventSize {
 			// This part fits, add it
