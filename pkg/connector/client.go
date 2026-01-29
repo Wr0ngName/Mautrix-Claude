@@ -523,12 +523,12 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		isImage := msg.Content.MsgType == event.MsgImage
 
 		if mentioned {
-			// Record this mention so subsequent images from this user are processed
-			c.recordMention(msg.Event.Sender, msg.Portal.PortalKey.ID)
-
 			// Check if this is a mention-only message (e.g., just "@claude" with no real content)
 			// These are typically sent as captions for images, so don't send to Claude - wait for the image
-			if c.isMentionOnlyMessage(msg) {
+			// BUT if this message IS already an image (phone sends image+mention as single message), process it now
+			if c.isMentionOnlyMessage(msg) && !isImage {
+				// Only record mention for image-waiting when we're actually waiting for an image
+				c.recordMention(msg.Event.Sender, msg.Portal.PortalKey.ID)
 				c.Connector.Log.Debug().Msg("Mention-only mode: Mention-only message (no content), waiting for image")
 				return &bridgev2.MatrixMessageResponse{}, nil
 			}
