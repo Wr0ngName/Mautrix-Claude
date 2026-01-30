@@ -10,8 +10,8 @@ import (
 	"go.mau.fi/mautrix-claude/pkg/claudeapi"
 )
 
-// GetOrUpdateGhost gets a ghost by ID and ensures its metadata is properly populated.
-// This fixes the issue where ghosts are created with empty Model metadata.
+// GetOrUpdateGhost gets a ghost by ID and ensures its metadata and Matrix profile are properly populated.
+// This fixes the issue where ghosts are created with empty Model metadata and no display name.
 func (c *ClaudeConnector) GetOrUpdateGhost(ctx context.Context, ghostID networkid.UserID, model string) (*bridgev2.Ghost, error) {
 	ghost, err := c.br.GetGhostByID(ctx, ghostID)
 	if err != nil {
@@ -25,14 +25,42 @@ func (c *ClaudeConnector) GetOrUpdateGhost(ctx context.Context, ghostID networki
 		ghost.Metadata = meta
 	}
 
+	// Track if we need to update
+	needsUpdate := false
+
 	// Set model if not already set
 	if meta.Model == "" && model != "" {
 		meta.Model = model
-		// Save to database using the bridge's DB accessor
-		if err := ghost.Bridge.DB.Ghost.Update(ctx, ghost.Ghost); err != nil {
-			c.Log.Warn().Err(err).Str("ghost_id", string(ghostID)).Msg("Failed to save ghost metadata")
-			// Non-fatal - continue with in-memory value
+		needsUpdate = true
+	}
+
+	// Update Matrix profile if name is not set or metadata changed
+	if ghost.Name == "" || needsUpdate {
+		modelName := meta.Model
+		if modelName == "" {
+			modelName = string(ghost.ID)
+			if modelName == "" {
+				modelName = c.Config.GetDefaultModel()
+			}
 		}
+
+		displayName := fmt.Sprintf("Claude (%s)", modelName)
+		if info := claudeapi.GetModelInfo(modelName); info != nil && info.DisplayName != "" {
+			displayName = info.DisplayName
+		}
+
+		isBot := true
+		userInfo := &bridgev2.UserInfo{
+			Name:        &displayName,
+			IsBot:       &isBot,
+			Identifiers: []string{fmt.Sprintf("claude:%s", modelName)},
+		}
+
+		ghost.UpdateInfo(ctx, userInfo)
+		c.Log.Debug().
+			Str("ghost_id", string(ghostID)).
+			Str("display_name", displayName).
+			Msg("Updated ghost display name")
 	}
 
 	return ghost, nil
