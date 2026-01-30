@@ -45,9 +45,6 @@ func (c *ClaudeConnector) GetOrUpdateGhost(ctx context.Context, ghostID networki
 		}
 
 		displayName := fmt.Sprintf("Claude (%s)", modelName)
-		if info := claudeapi.GetModelInfo(modelName); info != nil && info.DisplayName != "" {
-			displayName = info.DisplayName
-		}
 
 		isBot := true
 		userInfo := &bridgev2.UserInfo{
