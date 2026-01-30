@@ -561,12 +561,6 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	// Get or create conversation manager for this portal
 	convMgr := c.getConversationManager(msg.Portal)
 
-	// Get sender display name for multi-user awareness
-	senderName := msg.Event.Sender.String() // Fallback to MXID
-	if memberInfo, err := c.Connector.br.Matrix.GetMemberInfo(ctx, msg.Portal.MXID, msg.Event.Sender); err == nil && memberInfo != nil && memberInfo.Displayname != "" {
-		senderName = memberInfo.Displayname
-	}
-
 	// Build content array based on message type
 	userMsgID := string(msg.Event.ID)
 	var messageContent []claudeapi.Content
@@ -584,19 +578,19 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		}
 		messageContent = append(messageContent, *imageContent)
 
-		// Add caption/body text if present (with sender name)
+		// Add caption/body text if present
 		if msg.Content.Body != "" && msg.Content.Body != msg.Content.FileName {
 			// Use getMessageText to preserve display names in mentions
 			captionText := getMessageText(msg.Content)
 			messageContent = append(messageContent, claudeapi.Content{
 				Type: "text",
-				Text: fmt.Sprintf("[%s]: %s", senderName, captionText),
+				Text: captionText,
 			})
 		} else {
-			// Add a default prompt for image analysis (with sender name)
+			// Add a default prompt for image analysis
 			messageContent = append(messageContent, claudeapi.Content{
 				Type: "text",
-				Text: fmt.Sprintf("[%s]: What's in this image?", senderName),
+				Text: "What's in this image?",
 			})
 		}
 
@@ -615,11 +609,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		if err := ValidateMessageLength(messageText); err != nil {
 			return nil, err
 		}
-		// Prepend sender name so Claude knows who's talking
-		textWithSender := fmt.Sprintf("[%s]: %s", senderName, messageText)
 		messageContent = append(messageContent, claudeapi.Content{
 			Type: "text",
-			Text: textWithSender,
+			Text: messageText,
 		})
 	}
 
