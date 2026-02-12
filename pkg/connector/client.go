@@ -1544,32 +1544,29 @@ func (c *ClaudeClient) ResolveIdentifier(ctx context.Context, identifier string,
 	return resp, nil
 }
 
-// parseModelIdentifier parses an identifier and returns the full model name.
-// This uses friendly aliases that map to actual model IDs.
+// parseModelIdentifier parses an identifier and returns a model name.
+// Returns a family name (opus, sonnet, haiku) for friendly aliases, or passes
+// through full model IDs as-is. The actual resolution to a versioned model ID
+// happens later at message send time (in HandleMatrixMessage).
 func (c *ClaudeClient) parseModelIdentifier(identifier string) string {
 	identifier = strings.ToLower(strings.TrimSpace(identifier))
 
-	// Map friendly names to default model aliases
-	// These will be validated against the API when used
+	// Map friendly names to family names
 	switch identifier {
 	case "claude", "sonnet", "claude-sonnet":
 		return c.Connector.Config.GetDefaultModel()
 	case "opus", "claude-opus":
-		return "claude-opus-4-5-20251101"
+		return "opus"
 	case "haiku", "claude-haiku":
-		return "claude-haiku-4-5-20251001"
+		return "haiku"
 	}
 
-	// Check if it's a model family name (e.g., "claude_opus" ghost ID format)
+	// Check "claude_*" ghost ID format (e.g., "claude_opus")
 	if strings.HasPrefix(identifier, "claude_") {
 		family := strings.TrimPrefix(identifier, "claude_")
 		switch family {
-		case "opus":
-			return "claude-opus-4-5-20251101"
-		case "sonnet":
-			return c.Connector.Config.GetDefaultModel()
-		case "haiku":
-			return "claude-haiku-4-5-20251001"
+		case "opus", "sonnet", "haiku":
+			return family
 		}
 	}
 

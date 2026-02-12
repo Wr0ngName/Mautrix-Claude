@@ -267,17 +267,6 @@ func GetLatestModelByFamilyFromAPI(ctx context.Context, apiKey string, family st
 	return modelID, nil
 }
 
-// GetDefaultModelID returns a sensible default model ID.
-// If cache is available, returns the latest sonnet. Otherwise returns a fallback.
-func GetDefaultModelID() string {
-	// Try to get latest sonnet from cache
-	if modelID := GetLatestModelByFamily("sonnet"); modelID != "" {
-		return modelID
-	}
-	// Fallback only used if cache is empty (first run before any API calls)
-	// The API will resolve this or fail with a helpful error
-	return "claude-sonnet-4-5-20250929"
-}
 
 // EstimateMaxTokens returns estimated max tokens for a model based on family.
 // These are approximations - actual limits come from API responses.
