@@ -8,6 +8,5 @@ data/
 __pycache__/
 *.pyc
 
-# Review files
-*_REVIEW*.md
-SECURITY_SUMMARY.md
+# Claude Code
+.claude/
