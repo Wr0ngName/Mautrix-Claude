@@ -3,6 +3,7 @@ module go.mau.fi/mautrix-claude
 go 1.24.0
 
 require (
+	github.com/anthropics/anthropic-sdk-go v1.22.1
 	github.com/rs/zerolog v1.34.0
 	go.mau.fi/util v0.9.5
 	maunium.net/go/mautrix v0.26.2
@@ -10,7 +11,6 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/anthropics/anthropic-sdk-go v1.19.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/coreos/go-systemd/v22 v22.6.0 // indirect
 	github.com/lib/pq v1.10.9 // indirect
