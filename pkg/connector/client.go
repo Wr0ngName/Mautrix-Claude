@@ -1162,6 +1162,7 @@ func (c *ClaudeClient) sendSizeErrorNotice(ctx context.Context, portal *bridgev2
 
 // splitMessage splits a message into chunks that fit within the size limit.
 // It tries to split on paragraph boundaries, then sentence boundaries, then word boundaries.
+// It also ensures that markdown code fences are properly closed and reopened across chunks.
 func splitMessage(text string, maxSize int) []string {
 	if len(text) <= maxSize {
 		return []string{text}
@@ -1182,7 +1183,52 @@ func splitMessage(text string, maxSize int) []string {
 		remaining = strings.TrimSpace(remaining[splitPoint:])
 	}
 
+	return fixCodeFencesAcrossChunks(parts)
+}
+
+// fixCodeFencesAcrossChunks ensures that if a code fence (```) is split across
+// chunks, the current chunk gets a closing fence and the next chunk gets an
+// opening fence (preserving the language tag).
+func fixCodeFencesAcrossChunks(parts []string) []string {
+	for i := 0; i < len(parts)-1; i++ {
+		open, lang := unclosedCodeFence(parts[i])
+		if !open {
+			continue
+		}
+		// Close the code fence in this chunk
+		parts[i] += "\n```"
+		// Reopen it in the next chunk
+		opener := "```"
+		if lang != "" {
+			opener = "```" + lang
+		}
+		parts[i+1] = opener + "\n" + parts[i+1]
+	}
 	return parts
+}
+
+// unclosedCodeFence scans text for markdown fenced code blocks (``` delimiters
+// at the start of a line) and returns whether the text ends inside an unclosed
+// fence. If so, it also returns the language tag from the opening fence line.
+func unclosedCodeFence(text string) (open bool, lang string) {
+	lines := strings.Split(text, "\n")
+	inFence := false
+	currentLang := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if !inFence {
+				// Opening fence — extract optional language tag
+				inFence = true
+				currentLang = strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+			} else {
+				// Closing fence
+				inFence = false
+				currentLang = ""
+			}
+		}
+	}
+	return inFence, currentLang
 }
 
 // findSplitPoint finds a good point to split the text, preferring paragraph, sentence, or word boundaries.

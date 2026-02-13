@@ -339,6 +339,182 @@ func TestSplitMessage(t *testing.T) {
 	})
 }
 
+func TestUnclosedCodeFence(t *testing.T) {
+	t.Run("no code fence", func(t *testing.T) {
+		open, lang := unclosedCodeFence("Hello world\nNo code here")
+		if open {
+			t.Error("expected no open fence")
+		}
+		if lang != "" {
+			t.Errorf("expected empty lang, got %q", lang)
+		}
+	})
+
+	t.Run("closed code fence", func(t *testing.T) {
+		text := "Before\n```go\nfunc main() {}\n```\nAfter"
+		open, _ := unclosedCodeFence(text)
+		if open {
+			t.Error("expected no open fence (fence is properly closed)")
+		}
+	})
+
+	t.Run("unclosed code fence", func(t *testing.T) {
+		text := "Before\n```python\ndef hello():\n    print('hi')"
+		open, lang := unclosedCodeFence(text)
+		if !open {
+			t.Error("expected open fence")
+		}
+		if lang != "python" {
+			t.Errorf("expected lang 'python', got %q", lang)
+		}
+	})
+
+	t.Run("unclosed code fence no language", func(t *testing.T) {
+		text := "Before\n```\nsome code"
+		open, lang := unclosedCodeFence(text)
+		if !open {
+			t.Error("expected open fence")
+		}
+		if lang != "" {
+			t.Errorf("expected empty lang, got %q", lang)
+		}
+	})
+
+	t.Run("multiple fences last one unclosed", func(t *testing.T) {
+		text := "```go\nfunc a() {}\n```\nSome text\n```json\n{\"key\": \"value\"}"
+		open, lang := unclosedCodeFence(text)
+		if !open {
+			t.Error("expected open fence")
+		}
+		if lang != "json" {
+			t.Errorf("expected lang 'json', got %q", lang)
+		}
+	})
+
+	t.Run("multiple fences all closed", func(t *testing.T) {
+		text := "```go\nfunc a() {}\n```\nSome text\n```json\n{}\n```"
+		open, _ := unclosedCodeFence(text)
+		if open {
+			t.Error("expected no open fence")
+		}
+	})
+}
+
+func TestFixCodeFencesAcrossChunks(t *testing.T) {
+	t.Run("no code fences unchanged", func(t *testing.T) {
+		parts := []string{"Hello world", "Another part"}
+		result := fixCodeFencesAcrossChunks(parts)
+		if len(result) != 2 {
+			t.Fatalf("expected 2 parts, got %d", len(result))
+		}
+		if result[0] != "Hello world" || result[1] != "Another part" {
+			t.Error("parts should be unchanged when no code fences")
+		}
+	})
+
+	t.Run("split inside code fence", func(t *testing.T) {
+		parts := []string{
+			"Before\n```go\nfunc main() {",
+			"    fmt.Println(\"hi\")\n}\n```\nAfter",
+		}
+		result := fixCodeFencesAcrossChunks(parts)
+		if len(result) != 2 {
+			t.Fatalf("expected 2 parts, got %d", len(result))
+		}
+		// First part should have closing fence appended
+		if !strings.HasSuffix(result[0], "\n```") {
+			t.Errorf("first part should end with closing fence, got: %q", result[0])
+		}
+		// Second part should have opening fence prepended
+		if !strings.HasPrefix(result[1], "```go\n") {
+			t.Errorf("second part should start with opening fence, got: %q", result[1])
+		}
+	})
+
+	t.Run("split inside code fence no language", func(t *testing.T) {
+		parts := []string{
+			"Before\n```\nsome code line 1",
+			"some code line 2\n```\nAfter",
+		}
+		result := fixCodeFencesAcrossChunks(parts)
+		if !strings.HasSuffix(result[0], "\n```") {
+			t.Errorf("first part should end with closing fence, got: %q", result[0])
+		}
+		if !strings.HasPrefix(result[1], "```\n") {
+			t.Errorf("second part should start with opening fence, got: %q", result[1])
+		}
+	})
+
+	t.Run("closed fence not modified", func(t *testing.T) {
+		parts := []string{
+			"Before\n```go\ncode\n```\nAfter",
+			"More text",
+		}
+		result := fixCodeFencesAcrossChunks(parts)
+		if result[0] != parts[0] {
+			t.Error("closed fence part should not be modified")
+		}
+		if result[1] != parts[1] {
+			t.Error("second part should not be modified")
+		}
+	})
+
+	t.Run("multiple chunks with fence split", func(t *testing.T) {
+		parts := []string{
+			"Text before\n```python\ndef hello():",
+			"    print('hello')",
+			"    return True\n```\nAfter",
+		}
+		result := fixCodeFencesAcrossChunks(parts)
+
+		// First chunk: should close the fence
+		if !strings.HasSuffix(result[0], "\n```") {
+			t.Errorf("chunk 0 should close fence, got: %q", result[0])
+		}
+		// Second chunk: should reopen and close (since it's still mid-fence after reopening)
+		if !strings.HasPrefix(result[1], "```python\n") {
+			t.Errorf("chunk 1 should open fence, got: %q", result[1])
+		}
+		if !strings.HasSuffix(result[1], "\n```") {
+			t.Errorf("chunk 1 should close fence, got: %q", result[1])
+		}
+		// Third chunk: should reopen
+		if !strings.HasPrefix(result[2], "```python\n") {
+			t.Errorf("chunk 2 should open fence, got: %q", result[2])
+		}
+	})
+
+	t.Run("single part unchanged", func(t *testing.T) {
+		parts := []string{"```go\ncode\n```"}
+		result := fixCodeFencesAcrossChunks(parts)
+		if result[0] != parts[0] {
+			t.Error("single part should not be modified")
+		}
+	})
+}
+
+func TestSplitMessageCodeFences(t *testing.T) {
+	t.Run("code fence split gets fixed", func(t *testing.T) {
+		// Build a message with a code block that will be split
+		code := strings.Repeat("x := 1\n", 500) // ~3500 chars of code
+		text := "Here is some code:\n```go\n" + code + "```\nEnd."
+
+		parts := splitMessage(text, 2000)
+
+		if len(parts) < 2 {
+			t.Fatalf("expected at least 2 parts, got %d", len(parts))
+		}
+
+		// Every part should have balanced code fences
+		for i, part := range parts {
+			opens := strings.Count(part, "```")
+			if opens%2 != 0 {
+				t.Errorf("part %d has unbalanced code fences (count: %d): %s...", i, opens, part[:min(100, len(part))])
+			}
+		}
+	})
+}
+
 func TestMinMessageSize(t *testing.T) {
 	t.Run("MinMessageSize is reasonable", func(t *testing.T) {
 		if MinMessageSize < 500 {
