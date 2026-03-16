@@ -33,7 +33,7 @@ RUN CGO_ENABLED=1 go build -tags "goolm" -o /usr/bin/mautrix-claude \
     ./cmd/mautrix-claude
 
 # ============== Stage 2: Get Node.js binary ==============
-FROM node:20-slim AS node
+FROM --platform=$TARGETPLATFORM node:20-slim AS node
 
 # ============== Stage 3: Final image ==============
 # Use minimal Debian base with Python
@@ -62,7 +62,8 @@ COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/bin/node /usr/local/bin/nodejs
 
 # Install yq for YAML processing
-RUN curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+ARG TARGETARCH
+RUN curl -sL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${TARGETARCH}" \
     -o /usr/bin/yq && chmod +x /usr/bin/yq
 
 # Create bridge user
