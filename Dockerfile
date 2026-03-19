@@ -44,11 +44,15 @@ ENV UID=1337 \
     CLAUDE_CONFIG_DIR=/data/.claude
 
 # Install system dependencies (Python for sidecar, minimal runtime)
+# libstdc++6 and libgcc-s1 are needed by the bundled Claude Code native CLI binary
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     bash \
     curl \
+    file \
     gosu \
+    libgcc-s1 \
+    libstdc++6 \
     libsqlite3-0 \
     python3 \
     python3-pip \
@@ -59,7 +63,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy Node.js from node stage (needed for Claude Agent SDK CLI)
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s /usr/local/bin/node /usr/local/bin/nodejs
+RUN ln -s /usr/local/bin/node /usr/local/bin/nodejs \
+    && ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 # Install yq for YAML processing
 ARG TARGETARCH
@@ -79,6 +85,18 @@ COPY --from=builder /usr/bin/mautrix-claude /usr/bin/mautrix-claude
 # Copy and install Python sidecar
 COPY sidecar/requirements.txt /app/sidecar/
 RUN pip install --no-cache-dir --break-system-packages -r /app/sidecar/requirements.txt
+
+# Verify bundled Claude CLI works at build time (catches arch mismatches, missing libs)
+RUN BUNDLED_CLI=$(python3 -c "import claude_agent_sdk; from pathlib import Path; p = Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude'; print(p) if p.exists() else print('NOT_FOUND')") \
+    && echo "Bundled CLI: ${BUNDLED_CLI}" \
+    && if [ "${BUNDLED_CLI}" != "NOT_FOUND" ]; then \
+        echo "--- Binary info ---" && file "${BUNDLED_CLI}" && \
+        echo "--- Shared libraries ---" && (ldd "${BUNDLED_CLI}" 2>&1 || echo "statically linked or ldd not applicable") && \
+        echo "--- Target arch: ${TARGETARCH} ---" && \
+        echo "--- Testing CLI execution ---" && "${BUNDLED_CLI}" --version 2>&1 || echo "WARNING: CLI --version failed with exit code $?"; \
+    else \
+        echo "WARNING: No bundled Claude CLI found in claude-agent-sdk"; \
+    fi
 
 COPY sidecar/main.py /app/sidecar/
 

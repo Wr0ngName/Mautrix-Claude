@@ -43,6 +43,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Enable DEBUG logging for Claude Agent SDK transport to capture CLI stderr details
+logging.getLogger('claude_agent_sdk._internal.transport').setLevel(logging.DEBUG)
+logging.getLogger('claude_agent_sdk._internal.transport.subprocess_cli').setLevel(logging.DEBUG)
+logging.getLogger('claude_agent_sdk._internal.query').setLevel(logging.DEBUG)
+logging.getLogger('claude_agent_sdk').setLevel(logging.DEBUG)
+
 # Configuration
 PORT = int(os.getenv("CLAUDE_SIDECAR_PORT", "8090"))
 QUERY_TIMEOUT = int(os.getenv("CLAUDE_SIDECAR_QUERY_TIMEOUT", "300"))  # 5 minutes default
@@ -114,17 +120,38 @@ async def lifespan(app: FastAPI):
     # Verify CLI and Node.js are available (for OAuth and Agent SDK)
     try:
         claude_cli = _find_claude_cli()
+
+        # Log binary details for architecture debugging
+        import platform
+        logger.info(f"Platform: {platform.machine()} / {platform.system()}")
+        file_result = subprocess.run(['file', claude_cli], capture_output=True, text=True, timeout=5)
+        if file_result.stdout.strip():
+            logger.info(f"CLI binary type: {file_result.stdout.strip()}")
+
+        # Check shared library dependencies
+        ldd_result = subprocess.run(['ldd', claude_cli], capture_output=True, text=True, timeout=5)
+        if ldd_result.returncode == 0 and ldd_result.stdout.strip():
+            logger.info(f"CLI shared libs:\n{ldd_result.stdout.strip()}")
+        elif ldd_result.stderr.strip():
+            logger.warning(f"CLI ldd stderr: {ldd_result.stderr.strip()}")
+
         cli_result = subprocess.run([claude_cli, '--version'], capture_output=True, text=True, timeout=10)
         logger.info(f"Claude CLI: {claude_cli} (exit={cli_result.returncode})")
         if cli_result.stdout.strip():
             logger.info(f"CLI version: {cli_result.stdout.strip()}")
-        if cli_result.returncode != 0 and cli_result.stderr:
-            logger.warning(f"CLI stderr: {cli_result.stderr.strip()}")
+        if cli_result.returncode != 0:
+            logger.error(f"CLI --version FAILED (exit={cli_result.returncode})")
+            if cli_result.stderr:
+                logger.error(f"CLI stderr: {cli_result.stderr.strip()}")
+            if cli_result.stdout:
+                logger.error(f"CLI stdout: {cli_result.stdout.strip()}")
 
         node_result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
         logger.info(f"Node.js: {node_result.stdout.strip()}")
+        if node_result.returncode != 0:
+            logger.error(f"Node.js check failed: {node_result.stderr.strip()}")
     except Exception as e:
-        logger.error(f"CLI verification failed: {e}")
+        logger.error(f"CLI verification failed: {e}", exc_info=True)
 
     # Validate Claude Code authentication
     _auth_validated = await validate_claude_auth()
@@ -600,6 +627,10 @@ async def validate_claude_auth() -> bool:
         return False
     except Exception as e:
         logger.error(f"Claude Code authentication failed: {e}")
+        # Dump all exception attributes for debugging (ProcessError may have stderr, error_output, etc.)
+        error_attrs = {attr: getattr(e, attr, None) for attr in dir(e) if not attr.startswith('_') and not callable(getattr(e, attr, None))}
+        if error_attrs:
+            logger.error(f"Auth ProcessError attributes: {error_attrs}")
         return False
 
 
@@ -1086,6 +1117,10 @@ async def chat(request: ChatRequest):
         except Exception as e:
             # Log full error but don't expose details to client (security)
             logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
+            # Dump all exception attributes for debugging (ProcessError may have stderr, error_output, etc.)
+            error_attrs = {attr: getattr(e, attr, None) for attr in dir(e) if not attr.startswith('_') and not callable(getattr(e, attr, None))}
+            if error_attrs:
+                logger.error(f"ProcessError attributes: {error_attrs}")
             REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
             raise HTTPException(status_code=500, detail="Internal error processing request")
         finally:
@@ -1255,6 +1290,10 @@ async def chat_stream(request: ChatRequest):
             except Exception as e:
                 # Log full error but don't expose details to client (security)
                 logger.error(f"Error in stream for portal {request.portal_id}: {e}", exc_info=True)
+                # Dump all exception attributes for debugging
+                error_attrs = {attr: getattr(e, attr, None) for attr in dir(e) if not attr.startswith('_') and not callable(getattr(e, attr, None))}
+                if error_attrs:
+                    logger.error(f"Stream ProcessError attributes: {error_attrs}")
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error processing request'})}\n\n"
             finally:
                 # Restore original environment variables
