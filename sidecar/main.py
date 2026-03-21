@@ -158,42 +158,27 @@ async def lifespan(app: FastAPI):
         if node_result.returncode != 0:
             logger.error(f"Node.js check failed: {node_result.stderr.strip()}")
 
-        # Test the CLI in the exact interactive IPC mode the SDK uses
-        # SDK runs: claude --output-format stream-json --verbose --input-format stream-json
-        # Then sends JSON on stdin and reads JSON from stdout.
-        # The --print one-shot mode works fine, but the interactive mode fails,
-        # so we must test with Popen to capture stderr during interactive use.
+        # Test the CLI with --print mode (simpler, captures stdout/stderr directly)
         test_env = {
             **os.environ,
             'CLAUDE_CONFIG_DIR': os.environ.get('CLAUDE_CONFIG_DIR', '/data/.claude'),
             'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
         }
-        logger.info("Testing CLI in interactive SDK mode (stream-json IPC)...")
+        # Test without auth token first (should fail with "Not logged in")
+        logger.info("Testing CLI --print without auth token...")
         try:
-            ipc_proc = subprocess.Popen(
-                [claude_cli, '--output-format', 'stream-json', '--verbose',
-                 '--input-format', 'stream-json', '--model', MODEL,
-                 '--max-turns', '1', '--permission-mode', 'bypassPermissions'],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env=test_env,
+            noauth_test = subprocess.run(
+                [claude_cli, '--print', '-p', 'say OK', '--output-format', 'json',
+                 '--model', MODEL, '--max-turns', '1'],
+                capture_output=True, text=True, timeout=30, env=test_env,
             )
-            # Send an initialize-like message similar to what the SDK sends, then close stdin
-            init_msg = json.dumps({"type": "user_message", "message": "say OK"}) + "\n"
-            try:
-                ipc_stdout, ipc_stderr = ipc_proc.communicate(input=init_msg, timeout=20)
-            except subprocess.TimeoutExpired:
-                ipc_proc.kill()
-                ipc_stdout, ipc_stderr = ipc_proc.communicate()
-                logger.error("  IPC test: TIMED OUT after 20s")
-            logger.info(f"  IPC test exit={ipc_proc.returncode}")
-            if ipc_stdout.strip():
-                logger.info(f"  IPC stdout (first 1000): {ipc_stdout.strip()[:1000]}")
-            if ipc_stderr.strip():
-                logger.error(f"  IPC STDERR (first 2000): {ipc_stderr.strip()[:2000]}")
-            if ipc_proc.returncode != 0:
-                logger.error(f"  IPC test FAILED with exit code {ipc_proc.returncode}")
+            logger.info(f"  No-auth test exit={noauth_test.returncode}")
+            if noauth_test.stdout.strip():
+                logger.info(f"  No-auth stdout: {noauth_test.stdout.strip()[:500]}")
+            if noauth_test.stderr.strip():
+                logger.info(f"  No-auth stderr: {noauth_test.stderr.strip()[:500]}")
         except Exception as e:
-            logger.error(f"  IPC test exception: {e}", exc_info=True)
+            logger.error(f"  No-auth test exception: {e}", exc_info=True)
     except Exception as e:
         logger.error(f"CLI verification failed: {e}", exc_info=True)
 
@@ -1020,11 +1005,38 @@ async def chat(request: ChatRequest):
             if request.user_id and request.credentials_json:
                 try:
                     creds = json.loads(request.credentials_json)
+                    logger.info(f"Credentials keys for user {request.user_id[:20]}...: {list(creds.keys())}")
                     if "oauthToken" in creds:
-                        # Use CLAUDE_CODE_OAUTH_TOKEN env var for setup-token tokens
-                        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = creds["oauthToken"]
+                        token = creds["oauthToken"]
+                        # Log token prefix/length for debugging (NEVER log full token)
+                        logger.info(f"Setting CLAUDE_CODE_OAUTH_TOKEN: prefix={token[:12]}..., length={len(token)}")
+                        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
                         using_oauth_token = True
-                        logger.debug(f"Using OAuth token for user {request.user_id[:20]}...")
+
+                        # Test CLI directly with this token to capture exact error
+                        try:
+                            claude_cli = _find_claude_cli()
+                            test_env = {
+                                **os.environ,
+                                'CLAUDE_CODE_OAUTH_TOKEN': token,
+                                'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
+                            }
+                            logger.info("Direct CLI test with user OAuth token...")
+                            cli_test = subprocess.run(
+                                [claude_cli, '--print', '-p', 'say OK', '--output-format', 'json',
+                                 '--model', request.model or MODEL,
+                                 '--max-turns', '1'],
+                                capture_output=True, text=True, timeout=30, env=test_env,
+                            )
+                            logger.info(f"  CLI test exit={cli_test.returncode}")
+                            if cli_test.stdout.strip():
+                                logger.info(f"  CLI stdout (first 500): {cli_test.stdout.strip()[:500]}")
+                            if cli_test.stderr.strip():
+                                logger.warning(f"  CLI stderr (first 500): {cli_test.stderr.strip()[:500]}")
+                            if cli_test.returncode != 0:
+                                logger.error(f"  CLI FAILED with token: exit={cli_test.returncode}")
+                        except Exception as cli_err:
+                            logger.error(f"  CLI test exception: {cli_err}")
                     else:
                         config_dir = await credentials_manager.setup_credentials(
                             request.user_id, request.credentials_json
