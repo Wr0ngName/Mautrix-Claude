@@ -54,6 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgcc-s1 \
     libstdc++6 \
     libsqlite3-0 \
+    sqlite3 \
     python3 \
     python3-pip \
     python3-venv \
