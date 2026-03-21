@@ -27,6 +27,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Dict, Optional
 
+# Skip SDK version check — it spawns a subprocess that can interfere on aarch64
+os.environ["CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"] = "1"
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -925,111 +928,7 @@ async def chat(request: ChatRequest):
                         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
                         using_oauth_token = True
 
-                        # Test 6: Mirror exact SDK flow — background reader, init, then user msg
-                        try:
-                            claude_cli = _find_claude_cli()
-                            from claude_agent_sdk._version import __version__ as sdk_ver
-                            import asyncio as _asyncio
-                            test_env = {
-                                **os.environ,
-                                'CLAUDE_CODE_OAUTH_TOKEN': token,
-                                'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
-                                'CLAUDE_AGENT_SDK_VERSION': sdk_ver,
-                            }
-                            actual_model = request.model or MODEL
-
-                            sdk_cmd = [
-                                claude_cli, '--output-format', 'stream-json', '--verbose',
-                                '--system-prompt', '',
-                                '--allowedTools', ','.join(ALLOWED_TOOLS) if ALLOWED_TOOLS else '',
-                                '--disallowedTools', ','.join(DANGEROUS_TOOLS),
-                                '--permission-mode', 'bypassPermissions',
-                                '--model', actual_model,
-                                '--setting-sources', '',
-                                '--input-format', 'stream-json',
-                            ]
-                            logger.info(f"Test 6: exact SDK flow (bg reader + init + user msg)...")
-                            logger.info(f"  CMD: {' '.join(sdk_cmd[:5])}... ({len(sdk_cmd)} args)")
-
-                            proc = await _asyncio.create_subprocess_exec(
-                                *sdk_cmd,
-                                stdin=_asyncio.subprocess.PIPE,
-                                stdout=_asyncio.subprocess.PIPE,
-                                stderr=_asyncio.subprocess.PIPE,
-                                env=test_env,
-                            )
-
-                            # Collect stdout lines and stderr in background (like SDK does)
-                            stdout_lines = []
-                            stderr_lines = []
-                            async def read_stdout():
-                                while True:
-                                    line = await proc.stdout.readline()
-                                    if not line:
-                                        break
-                                    stdout_lines.append(line.decode().strip())
-                            async def read_stderr():
-                                while True:
-                                    line = await proc.stderr.readline()
-                                    if not line:
-                                        break
-                                    stderr_lines.append(line.decode().strip())
-
-                            stdout_task = _asyncio.create_task(read_stdout())
-                            stderr_task = _asyncio.create_task(read_stderr())
-
-                            # Step 1: Send initialize (like SDK query.initialize())
-                            init_req = json.dumps({"type": "control_request", "request_id": "test_1",
-                                                   "request": {"subtype": "initialize", "hooks": None}}) + "\n"
-                            proc.stdin.write(init_req.encode())
-                            await proc.stdin.drain()
-                            logger.info("  Sent initialize, waiting for response...")
-
-                            # Wait for initialize response
-                            for _ in range(50):  # 5 seconds max
-                                await _asyncio.sleep(0.1)
-                                if stdout_lines:
-                                    break
-                            if stdout_lines:
-                                logger.info(f"  Init response: {stdout_lines[0][:200]}")
-                            else:
-                                logger.error("  No init response after 5s!")
-
-                            # Step 2: Send user message (like SDK client.py line 132)
-                            user_msg = json.dumps({"type": "user", "session_id": "",
-                                                   "message": {"role": "user", "content": "say OK"},
-                                                   "parent_tool_use_id": None}) + "\n"
-                            proc.stdin.write(user_msg.encode())
-                            await proc.stdin.drain()
-                            logger.info("  Sent user message, waiting for result...")
-
-                            # Step 3: Wait for result (SDK calls wait_for_result_and_end_input)
-                            # Then close stdin
-                            await _asyncio.sleep(1)
-                            proc.stdin.close()
-                            await proc.stdin.wait_closed()
-
-                            # Wait for process to finish
-                            try:
-                                await _asyncio.wait_for(proc.wait(), timeout=30)
-                            except _asyncio.TimeoutError:
-                                proc.kill()
-                                await proc.wait()
-
-                            stdout_task.cancel()
-                            stderr_task.cancel()
-
-                            logger.info(f"  Test 6 exit={proc.returncode}")
-                            logger.info(f"  Test 6 stdout lines={len(stdout_lines)}")
-                            for i, line in enumerate(stdout_lines[:10]):
-                                logger.info(f"  stdout[{i}]: {line[:300]}")
-                            if stderr_lines:
-                                logger.warning(f"  Test 6 stderr lines={len(stderr_lines)}")
-                                for i, line in enumerate(stderr_lines[:5]):
-                                    logger.warning(f"  stderr[{i}]: {line[:300]}")
-
-                        except Exception as cli_err:
-                            logger.error(f"  CLI test exception: {cli_err}", exc_info=True)
+                        logger.info("Proceeding with SDK query...")
                     else:
                         config_dir = await credentials_manager.setup_credentials(
                             request.user_id, request.credentials_json
