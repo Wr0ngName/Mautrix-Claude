@@ -43,11 +43,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Enable DEBUG logging for Claude Agent SDK transport to capture CLI stderr details
-logging.getLogger('claude_agent_sdk._internal.transport').setLevel(logging.DEBUG)
-logging.getLogger('claude_agent_sdk._internal.transport.subprocess_cli').setLevel(logging.DEBUG)
-logging.getLogger('claude_agent_sdk._internal.query').setLevel(logging.DEBUG)
-logging.getLogger('claude_agent_sdk').setLevel(logging.DEBUG)
+# Enable INFO logging for Agent SDK transport (shows CLI path being used)
+logging.getLogger('claude_agent_sdk._internal.transport.subprocess_cli').setLevel(logging.INFO)
 
 # Configuration
 PORT = int(os.getenv("CLAUDE_SIDECAR_PORT", "8090"))
@@ -109,86 +106,36 @@ REQUEST_DURATION = Histogram('claude_sidecar_request_duration_seconds', 'Request
 ACTIVE_SESSIONS = Gauge('claude_sidecar_active_sessions', 'Number of active sessions')
 TOKENS_USED = Counter('claude_sidecar_tokens_total', 'Total tokens used', ['type'])
 
-# Track auth status globally
-_auth_validated = False
+# Track auth status globally (True by default since auth is per-user)
+_auth_validated = True
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
-    global _auth_validated
-
     # Startup
     await session_manager.start()
     logger.info(f"Claude sidecar starting on port {PORT}")
     logger.info(f"Allowed tools: {ALLOWED_TOOLS or 'none (chat only)'}")
     logger.info(f"Model: {MODEL}")
 
-    # Verify CLI and Node.js are available (for OAuth and Agent SDK)
+    # Quick CLI verification (only --version, no slow tests that block startup)
     try:
         claude_cli = _find_claude_cli()
-
-        # Log binary details for architecture debugging
         import platform
         logger.info(f"Platform: {platform.machine()} / {platform.system()}")
-        file_result = subprocess.run(['file', claude_cli], capture_output=True, text=True, timeout=5)
-        if file_result.stdout.strip():
-            logger.info(f"CLI binary type: {file_result.stdout.strip()}")
-
-        # Check shared library dependencies
-        ldd_result = subprocess.run(['ldd', claude_cli], capture_output=True, text=True, timeout=5)
-        if ldd_result.returncode == 0 and ldd_result.stdout.strip():
-            logger.info(f"CLI shared libs:\n{ldd_result.stdout.strip()}")
-        elif ldd_result.stderr.strip():
-            logger.warning(f"CLI ldd stderr: {ldd_result.stderr.strip()}")
 
         cli_result = subprocess.run([claude_cli, '--version'], capture_output=True, text=True, timeout=10)
-        logger.info(f"Claude CLI: {claude_cli} (exit={cli_result.returncode})")
-        if cli_result.stdout.strip():
-            logger.info(f"CLI version: {cli_result.stdout.strip()}")
+        logger.info(f"Claude CLI: {claude_cli} (exit={cli_result.returncode}, version={cli_result.stdout.strip()})")
         if cli_result.returncode != 0:
-            logger.error(f"CLI --version FAILED (exit={cli_result.returncode})")
-            if cli_result.stderr:
-                logger.error(f"CLI stderr: {cli_result.stderr.strip()}")
-            if cli_result.stdout:
-                logger.error(f"CLI stdout: {cli_result.stdout.strip()}")
-
-        node_result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
-        logger.info(f"Node.js: {node_result.stdout.strip()}")
-        if node_result.returncode != 0:
-            logger.error(f"Node.js check failed: {node_result.stderr.strip()}")
-
-        # Test the CLI with --print mode (simpler, captures stdout/stderr directly)
-        test_env = {
-            **os.environ,
-            'CLAUDE_CONFIG_DIR': os.environ.get('CLAUDE_CONFIG_DIR', '/data/.claude'),
-            'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
-        }
-        # Test without auth token first (should fail with "Not logged in")
-        logger.info("Testing CLI --print without auth token...")
-        try:
-            noauth_test = subprocess.run(
-                [claude_cli, '--print', '-p', 'say OK', '--output-format', 'json',
-                 '--model', MODEL, '--max-turns', '1'],
-                capture_output=True, text=True, timeout=30, env=test_env,
-            )
-            logger.info(f"  No-auth test exit={noauth_test.returncode}")
-            if noauth_test.stdout.strip():
-                logger.info(f"  No-auth stdout: {noauth_test.stdout.strip()[:500]}")
-            if noauth_test.stderr.strip():
-                logger.info(f"  No-auth stderr: {noauth_test.stderr.strip()[:500]}")
-        except Exception as e:
-            logger.error(f"  No-auth test exception: {e}", exc_info=True)
+            logger.error(f"CLI --version FAILED: stdout={cli_result.stdout.strip()}, stderr={cli_result.stderr.strip()}")
     except Exception as e:
         logger.error(f"CLI verification failed: {e}", exc_info=True)
 
-    # Validate Claude Code authentication
-    _auth_validated = await validate_claude_auth()
-    if not _auth_validated:
-        logger.error("WARNING: Claude Code is not authenticated!")
-        logger.error("Run 'claude' to authenticate before using sidecar mode")
-    else:
-        logger.info("Claude sidecar ready")
+    # Skip startup auth validation — it's meaningless without per-user credentials
+    # and it blocks the HTTP server from starting (causing bridge health check timeout).
+    # Per-user auth is validated on each request instead.
+    logger.info("Claude sidecar ready (auth validated per-request)")
 
     yield
 
@@ -627,41 +574,6 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
 # SECURITY: This prevents race conditions where concurrent requests could
 # cause User A's query to run with User B's credentials
 _env_lock = asyncio.Lock()
-
-
-async def validate_claude_auth() -> bool:
-    """Validate that Claude Code is authenticated by making a test query."""
-    try:
-        logger.info("Validating Claude Code authentication...")
-        options = ClaudeAgentOptions(
-            allowed_tools=[],  # No tools for validation
-            disallowed_tools=list(DANGEROUS_TOOLS),  # SECURITY: block dangerous tools
-            permission_mode="bypassPermissions",
-            model=MODEL,
-            max_turns=1,  # Single turn only
-            stderr=_cli_stderr_callback,
-        )
-
-        # Simple test query - MUST consume all messages to avoid cancel scope errors
-        got_result = False
-        async for message in query(prompt="Say 'OK' and nothing else.", options=options):
-            if hasattr(message, 'result'):
-                got_result = True
-                # Don't break/return - let the generator complete naturally
-
-        if got_result:
-            logger.info("Claude Code authentication validated successfully")
-            return True
-
-        logger.warning("Auth validation: no result received")
-        return False
-    except Exception as e:
-        logger.error(f"Claude Code authentication failed: {e}")
-        # Dump all exception attributes for debugging (ProcessError may have stderr, error_output, etc.)
-        error_attrs = {attr: getattr(e, attr, None) for attr in dir(e) if not attr.startswith('_') and not callable(getattr(e, attr, None))}
-        if error_attrs:
-            logger.error(f"Auth ProcessError attributes: {error_attrs}")
-        return False
 
 
 @app.get("/health")
