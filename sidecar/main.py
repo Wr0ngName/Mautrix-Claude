@@ -925,7 +925,7 @@ async def chat(request: ChatRequest):
                         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
                         using_oauth_token = True
 
-                        # Test CLI with exact SDK flags to find what breaks
+                        # Test CLI via asyncio.create_subprocess_exec (same as SDK uses)
                         try:
                             claude_cli = _find_claude_cli()
                             from claude_agent_sdk._version import __version__ as sdk_ver
@@ -937,63 +937,78 @@ async def chat(request: ChatRequest):
                             }
                             actual_model = request.model or MODEL
 
-                            # Test 1: --print mode (known working)
-                            logger.info("Test 1: --print mode (known working)...")
-                            t1 = subprocess.run(
-                                [claude_cli, '--print', '-p', 'say OK', '--output-format', 'json',
-                                 '--model', actual_model, '--max-turns', '1'],
-                                capture_output=True, text=True, timeout=30, env=test_env,
-                            )
-                            logger.info(f"  Test 1 exit={t1.returncode}")
-
-                            # Test 2: stream-json mode WITH --setting-sources ""
-                            # (this is what the SDK does - could be the culprit)
-                            logger.info("Test 2: stream-json + --setting-sources '' (SDK exact flags)...")
-                            t2 = subprocess.Popen(
-                                [claude_cli, '--output-format', 'stream-json', '--verbose',
-                                 '--input-format', 'stream-json', '--model', actual_model,
-                                 '--max-turns', '1', '--permission-mode', 'bypassPermissions',
-                                 '--system-prompt', '', '--setting-sources', '',
-                                 '--allowedTools', ','.join(ALLOWED_TOOLS) if ALLOWED_TOOLS else '',
-                                 '--disallowedTools', ','.join(DANGEROUS_TOOLS)],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=test_env,
-                            )
-                            # Send initialize + user message like SDK does
+                            # Build exact SDK command
+                            sdk_cmd = [
+                                claude_cli, '--output-format', 'stream-json', '--verbose',
+                                '--system-prompt', '',
+                                '--allowedTools', ','.join(ALLOWED_TOOLS) if ALLOWED_TOOLS else '',
+                                '--disallowedTools', ','.join(DANGEROUS_TOOLS),
+                                '--permission-mode', 'bypassPermissions',
+                                '--model', actual_model,
+                                '--setting-sources', '',
+                                '--input-format', 'stream-json',
+                            ]
                             init_req = json.dumps({"type": "control_request", "request_id": "test_1",
                                                    "request": {"subtype": "initialize", "hooks": None}}) + "\n"
                             user_msg = json.dumps({"type": "user_message", "message": {"role": "user",
                                                    "content": [{"type": "text", "text": "say OK"}]}}) + "\n"
-                            try:
-                                t2_out, t2_err = t2.communicate(input=init_req + user_msg, timeout=30)
-                            except subprocess.TimeoutExpired:
-                                t2.kill()
-                                t2_out, t2_err = t2.communicate()
-                            logger.info(f"  Test 2 exit={t2.returncode}")
-                            if t2_out.strip():
-                                logger.info(f"  Test 2 stdout (500): {t2_out.strip()[:500]}")
-                            if t2_err.strip():
-                                logger.warning(f"  Test 2 stderr (500): {t2_err.strip()[:500]}")
 
-                            # Test 3: stream-json WITHOUT --setting-sources
-                            logger.info("Test 3: stream-json WITHOUT --setting-sources...")
-                            t3 = subprocess.Popen(
-                                [claude_cli, '--output-format', 'stream-json', '--verbose',
-                                 '--input-format', 'stream-json', '--model', actual_model,
-                                 '--max-turns', '1', '--permission-mode', 'bypassPermissions'],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=test_env,
+                            # Test 4: asyncio.create_subprocess_exec (what anyio actually uses)
+                            import asyncio as _asyncio
+                            logger.info("Test 4: asyncio.create_subprocess_exec (same as SDK)...")
+                            t4_proc = await _asyncio.create_subprocess_exec(
+                                *sdk_cmd,
+                                stdin=_asyncio.subprocess.PIPE,
+                                stdout=_asyncio.subprocess.PIPE,
+                                stderr=_asyncio.subprocess.PIPE,
+                                env=test_env,
                             )
+                            t4_proc.stdin.write(init_req.encode())
+                            t4_proc.stdin.write(user_msg.encode())
+                            await t4_proc.stdin.drain()
+                            t4_proc.stdin.close()
+                            await t4_proc.stdin.wait_closed()
                             try:
-                                t3_out, t3_err = t3.communicate(input=init_req + user_msg, timeout=30)
-                            except subprocess.TimeoutExpired:
-                                t3.kill()
-                                t3_out, t3_err = t3.communicate()
-                            logger.info(f"  Test 3 exit={t3.returncode}")
-                            if t3_out.strip():
-                                logger.info(f"  Test 3 stdout (500): {t3_out.strip()[:500]}")
-                            if t3_err.strip():
-                                logger.warning(f"  Test 3 stderr (500): {t3_err.strip()[:500]}")
+                                t4_out, t4_err = await _asyncio.wait_for(t4_proc.communicate(), timeout=30)
+                            except _asyncio.TimeoutError:
+                                t4_proc.kill()
+                                t4_out, t4_err = await t4_proc.communicate()
+                            logger.info(f"  Test 4 exit={t4_proc.returncode}")
+                            if t4_out.strip():
+                                logger.info(f"  Test 4 stdout (500): {t4_out.decode().strip()[:500]}")
+                            if t4_err.strip():
+                                logger.warning(f"  Test 4 stderr (500): {t4_err.decode().strip()[:500]}")
+
+                            # Test 5: same but DON'T close stdin (leave pipe open like SDK does initially)
+                            logger.info("Test 5: asyncio subprocess, stdin left OPEN...")
+                            t5_proc = await _asyncio.create_subprocess_exec(
+                                *sdk_cmd,
+                                stdin=_asyncio.subprocess.PIPE,
+                                stdout=_asyncio.subprocess.PIPE,
+                                stderr=_asyncio.subprocess.PIPE,
+                                env=test_env,
+                            )
+                            t5_proc.stdin.write(init_req.encode())
+                            t5_proc.stdin.write(user_msg.encode())
+                            await t5_proc.stdin.drain()
+                            # NOTE: intentionally NOT closing stdin — SDK keeps it open for bidirectional IPC
+                            try:
+                                # Read stdout line by line with timeout
+                                t5_lines = []
+                                while True:
+                                    line = await _asyncio.wait_for(t5_proc.stdout.readline(), timeout=15)
+                                    if not line:
+                                        break
+                                    t5_lines.append(line.decode().strip())
+                                    if len(t5_lines) >= 5:
+                                        break
+                            except _asyncio.TimeoutError:
+                                logger.info(f"  Test 5: timed out after reading {len(t5_lines)} lines")
+                            t5_proc.kill()
+                            await t5_proc.wait()
+                            logger.info(f"  Test 5 exit={t5_proc.returncode}, lines_read={len(t5_lines)}")
+                            for i, line in enumerate(t5_lines[:3]):
+                                logger.info(f"  Test 5 line {i}: {line[:300]}")
 
                         except Exception as cli_err:
                             logger.error(f"  CLI test exception: {cli_err}", exc_info=True)
