@@ -158,36 +158,42 @@ async def lifespan(app: FastAPI):
         if node_result.returncode != 0:
             logger.error(f"Node.js check failed: {node_result.stderr.strip()}")
 
-        # Test the CLI in the exact mode the SDK uses to capture real stderr
+        # Test the CLI in the exact interactive IPC mode the SDK uses
         # SDK runs: claude --output-format stream-json --verbose --input-format stream-json
-        # Stderr is NOT captured by the SDK by default (inherits parent),
-        # so we test directly with capture_output=True
+        # Then sends JSON on stdin and reads JSON from stdout.
+        # The --print one-shot mode works fine, but the interactive mode fails,
+        # so we must test with Popen to capture stderr during interactive use.
         test_env = {
             **os.environ,
             'CLAUDE_CONFIG_DIR': os.environ.get('CLAUDE_CONFIG_DIR', '/data/.claude'),
             'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
         }
-        for test_label, test_args in [
-            ("--version", [claude_cli, '--version']),
-            ("SDK mode (stream-json)", [claude_cli, '--output-format', 'stream-json', '--verbose',
-                                        '--input-format', 'stream-json', '--print', '--max-turns', '1',
-                                        '-p', 'say OK']),
-        ]:
-            logger.info(f"Testing CLI: {test_label}")
-            test_result = subprocess.run(
-                test_args,
-                capture_output=True, text=True, timeout=30,
-                env=test_env,
+        logger.info("Testing CLI in interactive SDK mode (stream-json IPC)...")
+        try:
+            ipc_proc = subprocess.Popen(
+                [claude_cli, '--output-format', 'stream-json', '--verbose',
+                 '--input-format', 'stream-json', '--model', MODEL,
+                 '--max-turns', '1', '--permission-mode', 'bypassPermissions'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=test_env,
             )
-            logger.info(f"  exit={test_result.returncode}")
-            if test_result.stdout.strip():
-                stdout_preview = test_result.stdout.strip()[:1000]
-                logger.info(f"  stdout: {stdout_preview}")
-            if test_result.stderr.strip():
-                stderr_preview = test_result.stderr.strip()[:2000]
-                logger.error(f"  STDERR: {stderr_preview}")
-            if test_result.returncode != 0:
-                logger.error(f"  CLI test '{test_label}' FAILED with exit code {test_result.returncode}")
+            # Send an initialize-like message similar to what the SDK sends, then close stdin
+            init_msg = json.dumps({"type": "user_message", "message": "say OK"}) + "\n"
+            try:
+                ipc_stdout, ipc_stderr = ipc_proc.communicate(input=init_msg, timeout=20)
+            except subprocess.TimeoutExpired:
+                ipc_proc.kill()
+                ipc_stdout, ipc_stderr = ipc_proc.communicate()
+                logger.error("  IPC test: TIMED OUT after 20s")
+            logger.info(f"  IPC test exit={ipc_proc.returncode}")
+            if ipc_stdout.strip():
+                logger.info(f"  IPC stdout (first 1000): {ipc_stdout.strip()[:1000]}")
+            if ipc_stderr.strip():
+                logger.error(f"  IPC STDERR (first 2000): {ipc_stderr.strip()[:2000]}")
+            if ipc_proc.returncode != 0:
+                logger.error(f"  IPC test FAILED with exit code {ipc_proc.returncode}")
+        except Exception as e:
+            logger.error(f"  IPC test exception: {e}", exc_info=True)
     except Exception as e:
         logger.error(f"CLI verification failed: {e}", exc_info=True)
 
