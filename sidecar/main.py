@@ -925,30 +925,78 @@ async def chat(request: ChatRequest):
                         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
                         using_oauth_token = True
 
-                        # Test CLI directly with this token to capture exact error
+                        # Test CLI with exact SDK flags to find what breaks
                         try:
                             claude_cli = _find_claude_cli()
+                            from claude_agent_sdk._version import __version__ as sdk_ver
                             test_env = {
                                 **os.environ,
                                 'CLAUDE_CODE_OAUTH_TOKEN': token,
                                 'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
+                                'CLAUDE_AGENT_SDK_VERSION': sdk_ver,
                             }
-                            logger.info("Direct CLI test with user OAuth token...")
-                            cli_test = subprocess.run(
+                            actual_model = request.model or MODEL
+
+                            # Test 1: --print mode (known working)
+                            logger.info("Test 1: --print mode (known working)...")
+                            t1 = subprocess.run(
                                 [claude_cli, '--print', '-p', 'say OK', '--output-format', 'json',
-                                 '--model', request.model or MODEL,
-                                 '--max-turns', '1'],
+                                 '--model', actual_model, '--max-turns', '1'],
                                 capture_output=True, text=True, timeout=30, env=test_env,
                             )
-                            logger.info(f"  CLI test exit={cli_test.returncode}")
-                            if cli_test.stdout.strip():
-                                logger.info(f"  CLI stdout (first 500): {cli_test.stdout.strip()[:500]}")
-                            if cli_test.stderr.strip():
-                                logger.warning(f"  CLI stderr (first 500): {cli_test.stderr.strip()[:500]}")
-                            if cli_test.returncode != 0:
-                                logger.error(f"  CLI FAILED with token: exit={cli_test.returncode}")
+                            logger.info(f"  Test 1 exit={t1.returncode}")
+
+                            # Test 2: stream-json mode WITH --setting-sources ""
+                            # (this is what the SDK does - could be the culprit)
+                            logger.info("Test 2: stream-json + --setting-sources '' (SDK exact flags)...")
+                            t2 = subprocess.Popen(
+                                [claude_cli, '--output-format', 'stream-json', '--verbose',
+                                 '--input-format', 'stream-json', '--model', actual_model,
+                                 '--max-turns', '1', '--permission-mode', 'bypassPermissions',
+                                 '--system-prompt', '', '--setting-sources', '',
+                                 '--allowedTools', ','.join(ALLOWED_TOOLS) if ALLOWED_TOOLS else '',
+                                 '--disallowedTools', ','.join(DANGEROUS_TOOLS)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=test_env,
+                            )
+                            # Send initialize + user message like SDK does
+                            init_req = json.dumps({"type": "control_request", "request_id": "test_1",
+                                                   "request": {"subtype": "initialize", "hooks": None}}) + "\n"
+                            user_msg = json.dumps({"type": "user_message", "message": {"role": "user",
+                                                   "content": [{"type": "text", "text": "say OK"}]}}) + "\n"
+                            try:
+                                t2_out, t2_err = t2.communicate(input=init_req + user_msg, timeout=30)
+                            except subprocess.TimeoutExpired:
+                                t2.kill()
+                                t2_out, t2_err = t2.communicate()
+                            logger.info(f"  Test 2 exit={t2.returncode}")
+                            if t2_out.strip():
+                                logger.info(f"  Test 2 stdout (500): {t2_out.strip()[:500]}")
+                            if t2_err.strip():
+                                logger.warning(f"  Test 2 stderr (500): {t2_err.strip()[:500]}")
+
+                            # Test 3: stream-json WITHOUT --setting-sources
+                            logger.info("Test 3: stream-json WITHOUT --setting-sources...")
+                            t3 = subprocess.Popen(
+                                [claude_cli, '--output-format', 'stream-json', '--verbose',
+                                 '--input-format', 'stream-json', '--model', actual_model,
+                                 '--max-turns', '1', '--permission-mode', 'bypassPermissions'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=test_env,
+                            )
+                            try:
+                                t3_out, t3_err = t3.communicate(input=init_req + user_msg, timeout=30)
+                            except subprocess.TimeoutExpired:
+                                t3.kill()
+                                t3_out, t3_err = t3.communicate()
+                            logger.info(f"  Test 3 exit={t3.returncode}")
+                            if t3_out.strip():
+                                logger.info(f"  Test 3 stdout (500): {t3_out.strip()[:500]}")
+                            if t3_err.strip():
+                                logger.warning(f"  Test 3 stderr (500): {t3_err.strip()[:500]}")
+
                         except Exception as cli_err:
-                            logger.error(f"  CLI test exception: {cli_err}")
+                            logger.error(f"  CLI test exception: {cli_err}", exc_info=True)
                     else:
                         config_dir = await credentials_manager.setup_credentials(
                             request.user_id, request.credentials_json
