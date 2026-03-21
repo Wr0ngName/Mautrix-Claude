@@ -925,10 +925,11 @@ async def chat(request: ChatRequest):
                         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
                         using_oauth_token = True
 
-                        # Test CLI via asyncio.create_subprocess_exec (same as SDK uses)
+                        # Test 6: Mirror exact SDK flow — background reader, init, then user msg
                         try:
                             claude_cli = _find_claude_cli()
                             from claude_agent_sdk._version import __version__ as sdk_ver
+                            import asyncio as _asyncio
                             test_env = {
                                 **os.environ,
                                 'CLAUDE_CODE_OAUTH_TOKEN': token,
@@ -937,7 +938,6 @@ async def chat(request: ChatRequest):
                             }
                             actual_model = request.model or MODEL
 
-                            # Build exact SDK command
                             sdk_cmd = [
                                 claude_cli, '--output-format', 'stream-json', '--verbose',
                                 '--system-prompt', '',
@@ -948,67 +948,85 @@ async def chat(request: ChatRequest):
                                 '--setting-sources', '',
                                 '--input-format', 'stream-json',
                             ]
-                            init_req = json.dumps({"type": "control_request", "request_id": "test_1",
-                                                   "request": {"subtype": "initialize", "hooks": None}}) + "\n"
-                            user_msg = json.dumps({"type": "user_message", "message": {"role": "user",
-                                                   "content": [{"type": "text", "text": "say OK"}]}}) + "\n"
+                            logger.info(f"Test 6: exact SDK flow (bg reader + init + user msg)...")
+                            logger.info(f"  CMD: {' '.join(sdk_cmd[:5])}... ({len(sdk_cmd)} args)")
 
-                            # Test 4: asyncio.create_subprocess_exec (what anyio actually uses)
-                            import asyncio as _asyncio
-                            logger.info("Test 4: asyncio.create_subprocess_exec (same as SDK)...")
-                            t4_proc = await _asyncio.create_subprocess_exec(
+                            proc = await _asyncio.create_subprocess_exec(
                                 *sdk_cmd,
                                 stdin=_asyncio.subprocess.PIPE,
                                 stdout=_asyncio.subprocess.PIPE,
                                 stderr=_asyncio.subprocess.PIPE,
                                 env=test_env,
                             )
-                            t4_proc.stdin.write(init_req.encode())
-                            t4_proc.stdin.write(user_msg.encode())
-                            await t4_proc.stdin.drain()
-                            t4_proc.stdin.close()
-                            await t4_proc.stdin.wait_closed()
-                            try:
-                                t4_out, t4_err = await _asyncio.wait_for(t4_proc.communicate(), timeout=30)
-                            except _asyncio.TimeoutError:
-                                t4_proc.kill()
-                                t4_out, t4_err = await t4_proc.communicate()
-                            logger.info(f"  Test 4 exit={t4_proc.returncode}")
-                            if t4_out.strip():
-                                logger.info(f"  Test 4 stdout (500): {t4_out.decode().strip()[:500]}")
-                            if t4_err.strip():
-                                logger.warning(f"  Test 4 stderr (500): {t4_err.decode().strip()[:500]}")
 
-                            # Test 5: same but DON'T close stdin (leave pipe open like SDK does initially)
-                            logger.info("Test 5: asyncio subprocess, stdin left OPEN...")
-                            t5_proc = await _asyncio.create_subprocess_exec(
-                                *sdk_cmd,
-                                stdin=_asyncio.subprocess.PIPE,
-                                stdout=_asyncio.subprocess.PIPE,
-                                stderr=_asyncio.subprocess.PIPE,
-                                env=test_env,
-                            )
-                            t5_proc.stdin.write(init_req.encode())
-                            t5_proc.stdin.write(user_msg.encode())
-                            await t5_proc.stdin.drain()
-                            # NOTE: intentionally NOT closing stdin — SDK keeps it open for bidirectional IPC
-                            try:
-                                # Read stdout line by line with timeout
-                                t5_lines = []
+                            # Collect stdout lines and stderr in background (like SDK does)
+                            stdout_lines = []
+                            stderr_lines = []
+                            async def read_stdout():
                                 while True:
-                                    line = await _asyncio.wait_for(t5_proc.stdout.readline(), timeout=15)
+                                    line = await proc.stdout.readline()
                                     if not line:
                                         break
-                                    t5_lines.append(line.decode().strip())
-                                    if len(t5_lines) >= 5:
+                                    stdout_lines.append(line.decode().strip())
+                            async def read_stderr():
+                                while True:
+                                    line = await proc.stderr.readline()
+                                    if not line:
                                         break
+                                    stderr_lines.append(line.decode().strip())
+
+                            stdout_task = _asyncio.create_task(read_stdout())
+                            stderr_task = _asyncio.create_task(read_stderr())
+
+                            # Step 1: Send initialize (like SDK query.initialize())
+                            init_req = json.dumps({"type": "control_request", "request_id": "test_1",
+                                                   "request": {"subtype": "initialize", "hooks": None}}) + "\n"
+                            proc.stdin.write(init_req.encode())
+                            await proc.stdin.drain()
+                            logger.info("  Sent initialize, waiting for response...")
+
+                            # Wait for initialize response
+                            for _ in range(50):  # 5 seconds max
+                                await _asyncio.sleep(0.1)
+                                if stdout_lines:
+                                    break
+                            if stdout_lines:
+                                logger.info(f"  Init response: {stdout_lines[0][:200]}")
+                            else:
+                                logger.error("  No init response after 5s!")
+
+                            # Step 2: Send user message (like SDK client.py line 132)
+                            user_msg = json.dumps({"type": "user", "session_id": "",
+                                                   "message": {"role": "user", "content": "say OK"},
+                                                   "parent_tool_use_id": None}) + "\n"
+                            proc.stdin.write(user_msg.encode())
+                            await proc.stdin.drain()
+                            logger.info("  Sent user message, waiting for result...")
+
+                            # Step 3: Wait for result (SDK calls wait_for_result_and_end_input)
+                            # Then close stdin
+                            await _asyncio.sleep(1)
+                            proc.stdin.close()
+                            await proc.stdin.wait_closed()
+
+                            # Wait for process to finish
+                            try:
+                                await _asyncio.wait_for(proc.wait(), timeout=30)
                             except _asyncio.TimeoutError:
-                                logger.info(f"  Test 5: timed out after reading {len(t5_lines)} lines")
-                            t5_proc.kill()
-                            await t5_proc.wait()
-                            logger.info(f"  Test 5 exit={t5_proc.returncode}, lines_read={len(t5_lines)}")
-                            for i, line in enumerate(t5_lines[:3]):
-                                logger.info(f"  Test 5 line {i}: {line[:300]}")
+                                proc.kill()
+                                await proc.wait()
+
+                            stdout_task.cancel()
+                            stderr_task.cancel()
+
+                            logger.info(f"  Test 6 exit={proc.returncode}")
+                            logger.info(f"  Test 6 stdout lines={len(stdout_lines)}")
+                            for i, line in enumerate(stdout_lines[:10]):
+                                logger.info(f"  stdout[{i}]: {line[:300]}")
+                            if stderr_lines:
+                                logger.warning(f"  Test 6 stderr lines={len(stderr_lines)}")
+                                for i, line in enumerate(stderr_lines[:5]):
+                                    logger.warning(f"  stderr[{i}]: {line[:300]}")
 
                         except Exception as cli_err:
                             logger.error(f"  CLI test exception: {cli_err}", exc_info=True)
