@@ -96,6 +96,13 @@ SESSION_TIMEOUT = int(os.getenv("CLAUDE_SIDECAR_SESSION_TIMEOUT", "3600"))  # 1 
 MAX_MESSAGE_LENGTH = 100000  # ~100k chars, matches Go bridge limit
 MAX_PORTAL_ID_LENGTH = 256   # Reasonable limit for portal IDs
 
+
+def _cli_stderr_callback(line: str) -> None:
+    """Callback to capture Claude CLI subprocess stderr via the SDK.
+    Without this, stderr inherits the parent process and the SDK reports
+    'Check stderr output for details' with no actual details."""
+    logger.warning(f"Claude CLI stderr: {line}")
+
 # Prometheus metrics
 REQUESTS_TOTAL = Counter('claude_sidecar_requests_total', 'Total requests', ['endpoint', 'status'])
 REQUEST_DURATION = Histogram('claude_sidecar_request_duration_seconds', 'Request duration')
@@ -150,6 +157,37 @@ async def lifespan(app: FastAPI):
         logger.info(f"Node.js: {node_result.stdout.strip()}")
         if node_result.returncode != 0:
             logger.error(f"Node.js check failed: {node_result.stderr.strip()}")
+
+        # Test the CLI in the exact mode the SDK uses to capture real stderr
+        # SDK runs: claude --output-format stream-json --verbose --input-format stream-json
+        # Stderr is NOT captured by the SDK by default (inherits parent),
+        # so we test directly with capture_output=True
+        test_env = {
+            **os.environ,
+            'CLAUDE_CONFIG_DIR': os.environ.get('CLAUDE_CONFIG_DIR', '/data/.claude'),
+            'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
+        }
+        for test_label, test_args in [
+            ("--version", [claude_cli, '--version']),
+            ("SDK mode (stream-json)", [claude_cli, '--output-format', 'stream-json', '--verbose',
+                                        '--input-format', 'stream-json', '--print', '--max-turns', '1',
+                                        '-p', 'say OK']),
+        ]:
+            logger.info(f"Testing CLI: {test_label}")
+            test_result = subprocess.run(
+                test_args,
+                capture_output=True, text=True, timeout=30,
+                env=test_env,
+            )
+            logger.info(f"  exit={test_result.returncode}")
+            if test_result.stdout.strip():
+                stdout_preview = test_result.stdout.strip()[:1000]
+                logger.info(f"  stdout: {stdout_preview}")
+            if test_result.stderr.strip():
+                stderr_preview = test_result.stderr.strip()[:2000]
+                logger.error(f"  STDERR: {stderr_preview}")
+            if test_result.returncode != 0:
+                logger.error(f"  CLI test '{test_label}' FAILED with exit code {test_result.returncode}")
     except Exception as e:
         logger.error(f"CLI verification failed: {e}", exc_info=True)
 
@@ -610,6 +648,7 @@ async def validate_claude_auth() -> bool:
             permission_mode="bypassPermissions",
             model=MODEL,
             max_turns=1,  # Single turn only
+            stderr=_cli_stderr_callback,
         )
 
         # Simple test query - MUST consume all messages to avoid cancel scope errors
@@ -721,6 +760,7 @@ async def test_auth(request: TestAuthRequest):
                 permission_mode="bypassPermissions",
                 model="haiku",  # Use cheapest/fastest model for test
                 max_turns=1,
+                stderr=_cli_stderr_callback,
             )
 
             # Simple test prompt - consume all messages to avoid cleanup errors
@@ -999,6 +1039,7 @@ async def chat(request: ChatRequest):
                 disallowed_tools=list(DANGEROUS_TOOLS),  # CRITICAL: blocks Read, Write, Bash, etc.
                 permission_mode="bypassPermissions",  # No interactive prompts
                 model=actual_model,
+                stderr=_cli_stderr_callback,
             )
 
             # Resume session if session_id provided by bridge (stored in bridge DB)
@@ -1185,6 +1226,7 @@ async def chat_stream(request: ChatRequest):
                     disallowed_tools=list(DANGEROUS_TOOLS),
                     permission_mode="bypassPermissions",
                     model=actual_model,
+                    stderr=_cli_stderr_callback,
                 )
 
                 # Use session_id from request (bridge DB) if provided, otherwise fall back to local session
