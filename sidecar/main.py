@@ -709,7 +709,6 @@ async def test_auth(request: TestAuthRequest):
                 permission_mode="bypassPermissions",
                 model="haiku",  # Use cheapest/fastest model for test
                 max_turns=1,
-                stderr=_cli_stderr_callback,
             )
 
             # Simple test prompt - consume all messages to avoid cleanup errors
@@ -992,7 +991,6 @@ async def chat(request: ChatRequest):
                 disallowed_tools=list(DANGEROUS_TOOLS),  # CRITICAL: blocks Read, Write, Bash, etc.
                 permission_mode="bypassPermissions",  # No interactive prompts
                 model=actual_model,
-                stderr=_cli_stderr_callback,
             )
 
             # Resume session if session_id provided by bridge (stored in bridge DB)
@@ -1179,7 +1177,6 @@ async def chat_stream(request: ChatRequest):
                     disallowed_tools=list(DANGEROUS_TOOLS),
                     permission_mode="bypassPermissions",
                     model=actual_model,
-                    stderr=_cli_stderr_callback,
                 )
 
                 # Use session_id from request (bridge DB) if provided, otherwise fall back to local session
