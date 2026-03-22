@@ -1005,10 +1005,18 @@ async def chat(request: ChatRequest):
                         timeout_seconds=QUERY_TIMEOUT,
                         portal_id=request.portal_id,
                     )
-            except asyncio.TimeoutError:
-                # If we were trying to resume a session and it timed out, retry without resume
+            except (asyncio.TimeoutError, Exception) as e:
+                # If we were trying to resume a session and it failed, retry without resume.
+                # Session resume can fail with TimeoutError OR ProcessError (exit code 1)
+                # when the session_id is stale or the CLI doesn't support resume on this arch.
                 if session_id_to_use:
-                    logger.warning(f"Session resume timed out for {request.portal_id}, retrying without session_id")
+                    is_timeout = isinstance(e, asyncio.TimeoutError)
+                    logger.warning(
+                        "Session resume %s for %s (session=%s), retrying without session_id",
+                        "timed out" if is_timeout else "failed: " + str(e),
+                        request.portal_id,
+                        session_id_to_use,
+                    )
                     options.resume = None
                     if has_images and request.content:
                         query_result = await _run_multimodal_query_with_timeout(
@@ -1024,12 +1032,15 @@ async def chat(request: ChatRequest):
                             timeout_seconds=QUERY_TIMEOUT,
                             portal_id=request.portal_id,
                         )
-                else:
+                elif isinstance(e, asyncio.TimeoutError):
                     # No session to retry without, propagate the timeout
                     raise HTTPException(
                         status_code=504,
-                        detail=f"Request timed out after {QUERY_TIMEOUT}s"
+                        detail="Request timed out after %ds" % QUERY_TIMEOUT,
                     )
+                else:
+                    # No session resume involved, propagate the error
+                    raise
 
             # Estimate tokens if Agent SDK didn't provide them (~4 chars per token)
             if query_result.input_tokens == 0 and request.message:
@@ -1198,13 +1209,23 @@ async def chat_stream(request: ChatRequest):
                                 if hasattr(message.usage, 'output_tokens'):
                                     request_output_tokens += message.usage.output_tokens
                                     TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    logger.error(f"Stream query timed out after {QUERY_TIMEOUT}s for portal {request.portal_id}")
+                except (asyncio.TimeoutError, Exception) as e:
+                    # Session resume can fail with TimeoutError OR ProcessError (exit code 1)
+                    # when the session_id is stale or the CLI doesn't support resume on this arch.
+                    is_timeout = isinstance(e, asyncio.TimeoutError)
+                    if is_timeout:
+                        timed_out = True
+                        logger.error("Stream query timed out after %ds for portal %s", QUERY_TIMEOUT, request.portal_id)
+                    else:
+                        logger.error("Stream query failed for portal %s: %s", request.portal_id, e)
 
-                    # If we were resuming a session and it timed out, retry without session
+                    # If we were resuming a session and it failed, retry without session
                     if session_id_to_use or (session.message_count > 0):
-                        logger.warning(f"Retrying without session resume for {request.portal_id}")
+                        logger.warning(
+                            "Session resume %s for %s, retrying without session_id",
+                            "timed out" if is_timeout else "failed: " + str(e),
+                            request.portal_id,
+                        )
                         options.resume = None
                         try:
                             async with asyncio.timeout(QUERY_TIMEOUT):
@@ -1212,15 +1233,15 @@ async def chat_stream(request: ChatRequest):
                                     if hasattr(message, 'subtype') and message.subtype == 'init':
                                         if hasattr(message, 'data') and 'session_id' in message.data:
                                             session.session_id = message.data['session_id']
-                                            yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model})}\n\n"
+                                            yield "data: " + json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model}) + "\n\n"
                                     if hasattr(message, 'type') and message.type == 'assistant':
                                         if hasattr(message, 'message') and message.message:
                                             for block in message.message.content:
                                                 if hasattr(block, 'text'):
-                                                    yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
+                                                    yield "data: " + json.dumps({'type': 'text', 'content': block.text}) + "\n\n"
                                     if hasattr(message, 'result'):
                                         response_text = message.result
-                                        yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
+                                        yield "data: " + json.dumps({'type': 'result', 'content': message.result}) + "\n\n"
                                     if hasattr(message, 'usage'):
                                         if hasattr(message.usage, 'input_tokens'):
                                             request_input_tokens += message.usage.input_tokens
@@ -1229,12 +1250,15 @@ async def chat_stream(request: ChatRequest):
                                             request_output_tokens += message.usage.output_tokens
                                             TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
                             timed_out = False  # Retry succeeded
-                        except asyncio.TimeoutError:
-                            logger.error(f"Stream query retry also timed out for portal {request.portal_id}")
-                            yield f"data: {json.dumps({'type': 'error', 'message': f'Request timed out after {QUERY_TIMEOUT}s'})}\n\n"
+                        except (asyncio.TimeoutError, Exception) as retry_e:
+                            logger.error("Stream query retry also failed for portal %s: %s", request.portal_id, retry_e)
+                            yield "data: " + json.dumps({'type': 'error', 'message': 'Request failed after retry: ' + str(retry_e)}) + "\n\n"
                             return
                     else:
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'Request timed out after {QUERY_TIMEOUT}s'})}\n\n"
+                        if is_timeout:
+                            yield "data: " + json.dumps({'type': 'error', 'message': 'Request timed out after %ds' % QUERY_TIMEOUT}) + "\n\n"
+                        else:
+                            raise
                         return
 
                 # Estimate tokens if Agent SDK didn't provide them (~4 chars per token)
