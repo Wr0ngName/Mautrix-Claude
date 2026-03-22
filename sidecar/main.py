@@ -27,9 +27,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Dict, Optional
 
-# Skip SDK version check — it spawns a subprocess that can interfere on aarch64
-os.environ["CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"] = "1"
-
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -45,52 +42,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Enable DEBUG logging for Agent SDK transport to see everything
-logging.getLogger('claude_agent_sdk._internal.transport.subprocess_cli').setLevel(logging.DEBUG)
-logging.getLogger('claude_agent_sdk._internal.query').setLevel(logging.DEBUG)
-
-# =============================================================================
-# Monkey-patch SDK transport to log exact command + env, and capture real stderr
-# =============================================================================
-def _install_sdk_diagnostic_patch():
-    """Patch SubprocessCLITransport.connect() to log command/env before spawning."""
-    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
-    _original_connect = SubprocessCLITransport.connect
-
-    async def _patched_connect(self):
-        # Log the exact command that will be built
-        try:
-            cmd = self._build_command()
-            logger.info(f"[SDK-DIAG] CLI command: {cmd}")
-            logger.info(f"[SDK-DIAG] CLI path: {self._cli_path}")
-            logger.info(f"[SDK-DIAG] CWD: {self._cwd}")
-            # Log key env vars (not full env for security)
-            diag_env_keys = [
-                'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_ENTRYPOINT',
-                'CLAUDE_AGENT_SDK_VERSION', 'CLAUDECODE', 'DEBUG', 'NODE_OPTIONS',
-                'CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK', 'CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING',
-            ]
-            for key in diag_env_keys:
-                val = os.environ.get(key)
-                if val is not None:
-                    # Mask tokens
-                    if 'TOKEN' in key and len(val) > 16:
-                        val = val[:12] + '...' + f'(len={len(val)})'
-                    logger.info(f"[SDK-DIAG] env {key}={val}")
-            # Check for CLAUDECODE specifically
-            if 'CLAUDECODE' in os.environ:
-                logger.warning(f"[SDK-DIAG] CLAUDECODE is SET: '{os.environ['CLAUDECODE']}' — this may cause 'cannot launch inside another session' error!")
-        except Exception as e:
-            logger.error(f"[SDK-DIAG] Error logging command: {e}")
-
-        # Call original connect
-        return await _original_connect(self)
-
-    SubprocessCLITransport.connect = _patched_connect
-    logger.info("[SDK-DIAG] Installed diagnostic patch on SubprocessCLITransport.connect")
-
-_install_sdk_diagnostic_patch()
 
 # Configuration
 PORT = int(os.getenv("CLAUDE_SIDECAR_PORT", "8090"))
@@ -139,49 +90,49 @@ SESSION_TIMEOUT = int(os.getenv("CLAUDE_SIDECAR_SESSION_TIMEOUT", "3600"))  # 1 
 MAX_MESSAGE_LENGTH = 100000  # ~100k chars, matches Go bridge limit
 MAX_PORTAL_ID_LENGTH = 256   # Reasonable limit for portal IDs
 
-
-def _cli_stderr_callback(line: str) -> None:
-    """Callback to capture Claude CLI subprocess stderr via the SDK.
-    Without this, stderr inherits the parent process and the SDK reports
-    'Check stderr output for details' with no actual details."""
-    logger.warning(f"Claude CLI stderr: {line}")
-
 # Prometheus metrics
 REQUESTS_TOTAL = Counter('claude_sidecar_requests_total', 'Total requests', ['endpoint', 'status'])
 REQUEST_DURATION = Histogram('claude_sidecar_request_duration_seconds', 'Request duration')
 ACTIVE_SESSIONS = Gauge('claude_sidecar_active_sessions', 'Number of active sessions')
 TOKENS_USED = Counter('claude_sidecar_tokens_total', 'Total tokens used', ['type'])
 
-# Track auth status globally (True by default since auth is per-user)
-_auth_validated = True
+# Track auth status globally
+_auth_validated = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
+    global _auth_validated
+
     # Startup
     await session_manager.start()
     logger.info(f"Claude sidecar starting on port {PORT}")
     logger.info(f"Allowed tools: {ALLOWED_TOOLS or 'none (chat only)'}")
     logger.info(f"Model: {MODEL}")
 
-    # Quick CLI verification (only --version, no slow tests that block startup)
+    # Verify CLI and Node.js are available (for OAuth and Agent SDK)
     try:
         claude_cli = _find_claude_cli()
-        import platform
-        logger.info(f"Platform: {platform.machine()} / {platform.system()}")
-
         cli_result = subprocess.run([claude_cli, '--version'], capture_output=True, text=True, timeout=10)
-        logger.info(f"Claude CLI: {claude_cli} (exit={cli_result.returncode}, version={cli_result.stdout.strip()})")
-        if cli_result.returncode != 0:
-            logger.error(f"CLI --version FAILED: stdout={cli_result.stdout.strip()}, stderr={cli_result.stderr.strip()}")
-    except Exception as e:
-        logger.error(f"CLI verification failed: {e}", exc_info=True)
+        logger.info(f"Claude CLI: {claude_cli} (exit={cli_result.returncode})")
+        if cli_result.stdout.strip():
+            logger.info(f"CLI version: {cli_result.stdout.strip()}")
+        if cli_result.returncode != 0 and cli_result.stderr:
+            logger.warning(f"CLI stderr: {cli_result.stderr.strip()}")
 
-    # Skip startup auth validation — it's meaningless without per-user credentials
-    # and it blocks the HTTP server from starting (causing bridge health check timeout).
-    # Per-user auth is validated on each request instead.
-    logger.info("Claude sidecar ready (auth validated per-request)")
+        node_result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+        logger.info(f"Node.js: {node_result.stdout.strip()}")
+    except Exception as e:
+        logger.error(f"CLI verification failed: {e}")
+
+    # Validate Claude Code authentication
+    _auth_validated = await validate_claude_auth()
+    if not _auth_validated:
+        logger.error("WARNING: Claude Code is not authenticated!")
+        logger.error("Run 'claude' to authenticate before using sidecar mode")
+    else:
+        logger.info("Claude sidecar ready")
 
     yield
 
@@ -622,6 +573,36 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
 _env_lock = asyncio.Lock()
 
 
+async def validate_claude_auth() -> bool:
+    """Validate that Claude Code is authenticated by making a test query."""
+    try:
+        logger.info("Validating Claude Code authentication...")
+        options = ClaudeAgentOptions(
+            allowed_tools=[],  # No tools for validation
+            disallowed_tools=list(DANGEROUS_TOOLS),  # SECURITY: block dangerous tools
+            permission_mode="bypassPermissions",
+            model=MODEL,
+            max_turns=1,  # Single turn only
+        )
+
+        # Simple test query - MUST consume all messages to avoid cancel scope errors
+        got_result = False
+        async for message in query(prompt="Say 'OK' and nothing else.", options=options):
+            if hasattr(message, 'result'):
+                got_result = True
+                # Don't break/return - let the generator complete naturally
+
+        if got_result:
+            logger.info("Claude Code authentication validated successfully")
+            return True
+
+        logger.warning("Auth validation: no result received")
+        return False
+    except Exception as e:
+        logger.error(f"Claude Code authentication failed: {e}")
+        return False
+
+
 @app.get("/health")
 async def health():
     """
@@ -962,15 +943,11 @@ async def chat(request: ChatRequest):
             if request.user_id and request.credentials_json:
                 try:
                     creds = json.loads(request.credentials_json)
-                    logger.info(f"Credentials keys for user {request.user_id[:20]}...: {list(creds.keys())}")
                     if "oauthToken" in creds:
-                        token = creds["oauthToken"]
-                        # Log token prefix/length for debugging (NEVER log full token)
-                        logger.info(f"Setting CLAUDE_CODE_OAUTH_TOKEN: prefix={token[:12]}..., length={len(token)}")
-                        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
+                        # Use CLAUDE_CODE_OAUTH_TOKEN env var for setup-token tokens
+                        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = creds["oauthToken"]
                         using_oauth_token = True
-
-                        logger.info("Proceeding with SDK query...")
+                        logger.debug(f"Using OAuth token for user {request.user_id[:20]}...")
                     else:
                         config_dir = await credentials_manager.setup_credentials(
                             request.user_id, request.credentials_json
@@ -1109,10 +1086,6 @@ async def chat(request: ChatRequest):
         except Exception as e:
             # Log full error but don't expose details to client (security)
             logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
-            # Dump all exception attributes for debugging (ProcessError may have stderr, error_output, etc.)
-            error_attrs = {attr: getattr(e, attr, None) for attr in dir(e) if not attr.startswith('_') and not callable(getattr(e, attr, None))}
-            if error_attrs:
-                logger.error(f"ProcessError attributes: {error_attrs}")
             REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
             raise HTTPException(status_code=500, detail="Internal error processing request")
         finally:
@@ -1282,10 +1255,6 @@ async def chat_stream(request: ChatRequest):
             except Exception as e:
                 # Log full error but don't expose details to client (security)
                 logger.error(f"Error in stream for portal {request.portal_id}: {e}", exc_info=True)
-                # Dump all exception attributes for debugging
-                error_attrs = {attr: getattr(e, attr, None) for attr in dir(e) if not attr.startswith('_') and not callable(getattr(e, attr, None))}
-                if error_attrs:
-                    logger.error(f"Stream ProcessError attributes: {error_attrs}")
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error processing request'})}\n\n"
             finally:
                 # Restore original environment variables
@@ -1753,209 +1722,6 @@ async def delete_user(user_id: str):
     except Exception as e:
         logger.error(f"Failed to cleanup user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to cleanup user: {str(e)}")
-
-
-class DebugRequest(BaseModel):
-    """Request body for debug endpoint."""
-    credentials_json: Optional[str] = None
-
-
-@app.post("/v1/debug/sdk-vs-raw")
-async def debug_sdk_vs_raw(request: DebugRequest):
-    """
-    Diagnostic: run the exact SDK command via raw asyncio subprocess to compare.
-    Helps isolate whether the failure is in the CLI or the SDK's IPC layer.
-    Both tests use the exact same command, env, and credentials.
-    """
-    import platform
-    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
-    from claude_agent_sdk._internal._version import __version__ as sdk_version
-
-    results = {"platform": platform.machine(), "sdk_version": sdk_version}
-
-    # Set up credentials if provided
-    original_oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    using_oauth_token = False
-    if request.credentials_json:
-        try:
-            creds = json.loads(request.credentials_json)
-            if "oauthToken" in creds:
-                os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = creds["oauthToken"]
-                using_oauth_token = True
-                results["oauth_token_set"] = True
-        except Exception as e:
-            results["creds_error"] = str(e)
-
-    try:
-        # Build the exact command the SDK would build
-        options = ClaudeAgentOptions(
-            allowed_tools=[],
-            disallowed_tools=list(DANGEROUS_TOOLS),
-            permission_mode="bypassPermissions",
-            model="haiku",
-            max_turns=1,
-        )
-        transport = SubprocessCLITransport(prompt="test", options=options)
-        cmd = transport._build_command()
-        results["sdk_command"] = cmd
-
-        # Build the exact env the SDK would use
-        sdk_env = {
-            **os.environ,
-            "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-            "CLAUDE_AGENT_SDK_VERSION": sdk_version,
-        }
-        results["env_CLAUDECODE"] = sdk_env.get("CLAUDECODE", "<not set>")
-        results["env_DEBUG"] = sdk_env.get("DEBUG", "<not set>")
-        results["env_NODE_OPTIONS"] = sdk_env.get("NODE_OPTIONS", "<not set>")
-        results["env_CLAUDE_CODE_OAUTH_TOKEN"] = "set" if sdk_env.get("CLAUDE_CODE_OAUTH_TOKEN") else "<not set>"
-    except Exception as e:
-        results["command_build_error"] = str(e)
-        return results
-
-    # Test 1: Run via raw asyncio with the SDK's exact command, do full IPC handshake
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=sdk_env,
-        )
-
-        stdout_lines = []
-        stderr_lines = []
-
-        async def read_stderr():
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                stderr_lines.append(line.decode('utf-8', errors='replace').rstrip())
-
-        async def read_stdout():
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                stdout_lines.append(line.decode('utf-8', errors='replace').rstrip())
-
-        stderr_task = asyncio.create_task(read_stderr())
-
-        # Send initialize request (same as SDK)
-        init_request = json.dumps({
-            "type": "control_request",
-            "request_id": "req_diag_1",
-            "request": {"subtype": "initialize", "hooks": None},
-        }) + "\n"
-        proc.stdin.write(init_request.encode())
-        await proc.stdin.drain()
-
-        # Read stdout until we get the control_response or timeout
-        init_response = None
-        try:
-            async with asyncio.timeout(30):
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
-                    decoded = line.decode('utf-8', errors='replace').rstrip()
-                    stdout_lines.append(decoded)
-                    try:
-                        msg = json.loads(decoded)
-                        if msg.get("type") == "control_response":
-                            init_response = msg
-                            break
-                    except json.JSONDecodeError:
-                        # Non-JSON line on stdout — this would poison the SDK buffer!
-                        results["NON_JSON_ON_STDOUT"] = decoded
-                        continue
-        except asyncio.TimeoutError:
-            results["raw_init_timeout"] = True
-
-        if init_response:
-            results["raw_init_success"] = True
-
-            # Send user message (same as SDK)
-            user_msg = json.dumps({
-                "type": "user",
-                "session_id": "",
-                "message": {"role": "user", "content": "Say OK"},
-                "parent_tool_use_id": None,
-            }) + "\n"
-            proc.stdin.write(user_msg.encode())
-            await proc.stdin.drain()
-            proc.stdin.close()
-
-            # Read remaining stdout
-            try:
-                async with asyncio.timeout(60):
-                    while True:
-                        line = await proc.stdout.readline()
-                        if not line:
-                            break
-                        decoded = line.decode('utf-8', errors='replace').rstrip()
-                        stdout_lines.append(decoded)
-                        try:
-                            json.loads(decoded)
-                        except json.JSONDecodeError:
-                            if "NON_JSON_ON_STDOUT" not in results:
-                                results["NON_JSON_ON_STDOUT"] = []
-                            if isinstance(results.get("NON_JSON_ON_STDOUT"), list):
-                                results["NON_JSON_ON_STDOUT"].append(decoded)
-                            else:
-                                results["NON_JSON_ON_STDOUT"] = [results["NON_JSON_ON_STDOUT"], decoded]
-            except asyncio.TimeoutError:
-                results["raw_response_timeout"] = True
-        else:
-            results["raw_init_success"] = False
-
-        await stderr_task
-        rc = await proc.wait()
-        results["raw_exit_code"] = rc
-        results["raw_stdout_lines"] = len(stdout_lines)
-        results["raw_stderr_lines"] = stderr_lines[:20]  # First 20 stderr lines
-
-        # Show first few stdout lines for debugging
-        results["raw_stdout_first5"] = stdout_lines[:5]
-
-    except Exception as e:
-        results["raw_error"] = str(e)
-
-    # Test 2: Run via SDK query() for comparison
-    try:
-        sdk_options = ClaudeAgentOptions(
-            allowed_tools=[],
-            disallowed_tools=list(DANGEROUS_TOOLS),
-            permission_mode="bypassPermissions",
-            model="haiku",
-            max_turns=1,
-            stderr=_cli_stderr_callback,
-        )
-        sdk_messages = []
-        async with asyncio.timeout(60):
-            async for message in query(prompt="Say OK", options=sdk_options):
-                sdk_messages.append(str(type(message).__name__))
-        results["sdk_success"] = True
-        results["sdk_messages"] = sdk_messages
-    except Exception as e:
-        results["sdk_success"] = False
-        results["sdk_error"] = str(e)
-        # Get all attributes from ProcessError
-        results["sdk_error_attrs"] = {
-            attr: str(getattr(e, attr, None))
-            for attr in dir(e)
-            if not attr.startswith('_') and not callable(getattr(e, attr, None))
-        }
-
-    # Restore credentials
-    if using_oauth_token:
-        if original_oauth_token is not None:
-            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = original_oauth_token
-        elif "CLAUDE_CODE_OAUTH_TOKEN" in os.environ:
-            del os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
-
-    return results
 
 
 if __name__ == "__main__":
