@@ -542,7 +542,12 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
 
         # Check if we have the URL and prompt
         decoded = output.decode('utf-8', errors='ignore')
-        if 'https://claude.ai/oauth/authorize' in decoded and 'Paste code' in decoded:
+        # Support both old (claude.ai) and new (claude.com/cai) OAuth URL formats
+        has_url = (
+            'https://claude.ai/oauth/authorize' in decoded
+            or 'https://claude.com/cai/oauth/authorize' in decoded
+        )
+        if has_url and 'Paste code' in decoded:
             break
 
     # Parse the URL from output
@@ -554,7 +559,8 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
     clean = re.sub(r'\x1b.', '', clean)  # Any remaining single-char escapes
 
     # Find the OAuth URL
-    url_match = re.search(r'(https://claude\.ai/oauth/authorize\S+)', clean)
+    # Match both old (claude.ai/oauth) and new (claude.com/cai/oauth) URL formats
+    url_match = re.search(r'(https://claude\.(?:ai|com)/(?:cai/)?oauth/authorize\S+)', clean)
     if not url_match:
         os.close(master)
         proc.terminate()
