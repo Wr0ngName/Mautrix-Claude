@@ -6,7 +6,7 @@ import (
 )
 
 // DefaultTemperature is the default temperature when not specified.
-const DefaultTemperature = 1.0
+const DefaultTemperature = 0.6
 
 // ErrorMessagePrefix is the emoji/prefix used for error messages sent to Matrix rooms.
 // This provides visual distinction for error notices.
@@ -72,7 +72,7 @@ const (
 	// DefaultSidecarURL is the default URL for the sidecar service.
 	DefaultSidecarURL = "http://localhost:8090"
 	// DefaultSidecarTimeout is the default timeout for sidecar requests in seconds.
-	DefaultSidecarTimeout = 300
+	DefaultSidecarTimeout = 600
 )
 
 // GetURL returns the sidecar URL, using the default if not set.
@@ -100,13 +100,13 @@ const ExampleConfig = `# Default Claude model to use
 default_model: sonnet
 
 # Maximum tokens for responses (depends on model, typically 4096-64000)
-max_tokens: 4096
+max_tokens: 8192
 
-# Temperature controls randomness (0.0-1.0, default 1.0)
+# Temperature controls randomness (0.0-1.0, default 0.6)
 # Lower = more focused and deterministic
 # Higher = more creative and varied
 # Set to 0 for most deterministic responses
-temperature: 1.0
+temperature: 0.6
 
 # Default system prompt (can be overridden per room)
 system_prompt: "You are a helpful AI assistant."
@@ -126,8 +126,8 @@ sidecar:
     enabled: false
     # URL of the sidecar service (default: http://localhost:8090)
     url: "http://localhost:8090"
-    # Request timeout in seconds (default: 300)
-    timeout: 300
+    # Request timeout in seconds (default: 600)
+    timeout: 600
 `
 
 // Validate validates the configuration.
@@ -208,7 +208,7 @@ func GetModelFamilyName(model string) string {
 // GetMaxTokens returns the max tokens, using a default if not set.
 func (c *Config) GetMaxTokens() int {
 	if c.MaxTokens == 0 {
-		return 4096
+		return 8192
 	}
 	return c.MaxTokens
 }
@@ -225,7 +225,7 @@ func (c *Config) GetTemperature() float64 {
 // GetSystemPrompt returns the system prompt, using a default if not set.
 func (c *Config) GetSystemPrompt() string {
 	if c.SystemPrompt == "" {
-		return "You are a helpful AI assistant."
+		return "You are a helpful AI assistant in a chatroom."
 	}
 	return c.SystemPrompt
 }
