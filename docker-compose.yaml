@@ -13,6 +13,9 @@ services:
       - GID=1000
       # Increase Node.js memory limit for Claude Agent SDK
       - NODE_OPTIONS=--max-old-space-size=2048
+      # Sidecar query timeout in seconds (default: 900 = 15 minutes)
+      # Must match the bridge config sidecar.timeout for consistent behavior
+      # - CLAUDE_SIDECAR_QUERY_TIMEOUT=900
     # IMPORTANT: Claude Agent SDK's bundled CLI is extremely memory-hungry
     # Needs at least 2-4GB RAM. OOM kills happen with less.
     #

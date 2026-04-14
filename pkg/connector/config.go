@@ -63,7 +63,7 @@ type SidecarConfig struct {
 	// URL is the sidecar service URL (default: http://localhost:8090)
 	URL string `yaml:"url"`
 
-	// Timeout is the request timeout in seconds (default: 300)
+	// Timeout is the request timeout in seconds (default: 900)
 	Timeout int `yaml:"timeout"`
 }
 
@@ -72,7 +72,7 @@ const (
 	// DefaultSidecarURL is the default URL for the sidecar service.
 	DefaultSidecarURL = "http://localhost:8090"
 	// DefaultSidecarTimeout is the default timeout for sidecar requests in seconds.
-	DefaultSidecarTimeout = 600
+	DefaultSidecarTimeout = 900
 )
 
 // GetURL returns the sidecar URL, using the default if not set.
@@ -126,8 +126,8 @@ sidecar:
     enabled: false
     # URL of the sidecar service (default: http://localhost:8090)
     url: "http://localhost:8090"
-    # Request timeout in seconds (default: 600)
-    timeout: 600
+    # Request timeout in seconds (default: 900)
+    timeout: 900
 `
 
 // Validate validates the configuration.

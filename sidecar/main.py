@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 PORT = int(os.getenv("CLAUDE_SIDECAR_PORT", "8090"))
-QUERY_TIMEOUT = int(os.getenv("CLAUDE_SIDECAR_QUERY_TIMEOUT", "300"))  # 5 minutes default
+QUERY_TIMEOUT = int(os.getenv("CLAUDE_SIDECAR_QUERY_TIMEOUT", "900"))  # 15 minutes default
 
 # SECURITY: Whitelist of safe tools that are allowed in multi-user chat
 # NEVER add file access, bash, or code editing tools here

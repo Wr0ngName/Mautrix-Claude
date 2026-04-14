@@ -171,13 +171,13 @@ network:
     # Run the "models" command after login to see all available models
     default_model: sonnet
 
-    # Maximum tokens for responses (1-16384 depending on model)
-    max_tokens: 4096
+    # Maximum tokens for responses (depends on model, typically 4096-64000)
+    max_tokens: 8192
 
-    # Temperature controls randomness (0.0-1.0, default 1.0)
+    # Temperature controls randomness (0.0-1.0, default 0.6)
     # Lower = more focused and deterministic
     # Higher = more creative and varied
-    temperature: 1.0
+    temperature: 0.6
 
     # Default system prompt (can be overridden per room)
     system_prompt: "You are a helpful AI assistant."
@@ -194,6 +194,12 @@ network:
     # This allows using Pro/Max subscriptions instead of API credits
     sidecar:
         enabled: false
+        # URL of the sidecar service (default: http://localhost:8090)
+        url: "http://localhost:8090"
+        # Request timeout in seconds (default: 900)
+        # Both this and the CLAUDE_SIDECAR_QUERY_TIMEOUT env var on the sidecar
+        # should be set to the same value for consistent behavior
+        timeout: 900
 
 # Logging config
 logging:

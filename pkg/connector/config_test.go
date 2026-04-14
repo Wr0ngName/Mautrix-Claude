@@ -36,8 +36,8 @@ func TestSidecarConstants(t *testing.T) {
 		t.Errorf("DefaultSidecarURL = %s, want http://localhost:8090", DefaultSidecarURL)
 	}
 
-	if DefaultSidecarTimeout != 300 {
-		t.Errorf("DefaultSidecarTimeout = %d, want 300", DefaultSidecarTimeout)
+	if DefaultSidecarTimeout != 900 {
+		t.Errorf("DefaultSidecarTimeout = %d, want 900", DefaultSidecarTimeout)
 	}
 }
 
@@ -291,7 +291,7 @@ func TestGetMaxTokens(t *testing.T) {
 		{
 			name:   "zero max tokens uses default",
 			config: Config{MaxTokens: 0},
-			want:   4096,
+			want:   8192,
 		},
 	}
 
@@ -352,7 +352,7 @@ func TestGetSystemPrompt(t *testing.T) {
 		{
 			name:   "empty system prompt uses default",
 			config: Config{SystemPrompt: ""},
-			want:   "You are a helpful AI assistant.",
+			want:   "You are a helpful AI assistant in a chatroom.",
 		},
 	}
 
@@ -499,8 +499,8 @@ func TestTemperaturePtr(t *testing.T) {
 }
 
 func TestDefaultTemperature(t *testing.T) {
-	if DefaultTemperature != 1.0 {
-		t.Errorf("DefaultTemperature = %f, want 1.0", DefaultTemperature)
+	if DefaultTemperature != 0.6 {
+		t.Errorf("DefaultTemperature = %f, want 0.6", DefaultTemperature)
 	}
 }
 
