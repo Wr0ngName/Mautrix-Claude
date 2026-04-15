@@ -745,7 +745,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	// Create a context with timeout for the sidecar call to prevent hanging forever
-	// Use sidecar timeout config (defaults to 5 minutes)
+	// Use sidecar timeout config (defaults to 15 minutes / 900s)
 	streamTimeout := time.Duration(c.Connector.Config.Sidecar.GetTimeout()) * time.Second
 	if streamTimeout <= 0 {
 		streamTimeout = 5 * time.Minute
