@@ -187,6 +187,20 @@ func TestMetadataStructures(t *testing.T) {
 		}
 	})
 
+	t.Run("PortalMetadata ShowThinking field", func(t *testing.T) {
+		meta := &PortalMetadata{
+			ShowThinking: true,
+		}
+		if !meta.ShowThinking {
+			t.Error("ShowThinking should be true")
+		}
+
+		meta2 := &PortalMetadata{}
+		if meta2.ShowThinking {
+			t.Error("ShowThinking should default to false")
+		}
+	})
+
 	t.Run("MessageMetadata has ClaudeMessageID", func(t *testing.T) {
 		meta := &MessageMetadata{
 			ClaudeMessageID: "msg_123",

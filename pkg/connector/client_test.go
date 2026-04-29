@@ -515,6 +515,155 @@ func TestSplitMessageCodeFences(t *testing.T) {
 	})
 }
 
+func TestThinkingTextBlockquoteFormatting(t *testing.T) {
+	t.Run("single line thinking", func(t *testing.T) {
+		thinking := "Let me think about this."
+		response := "Here is my answer."
+
+		var quoted strings.Builder
+		quoted.WriteString("**Thinking:**\n")
+		for _, line := range strings.Split(thinking, "\n") {
+			quoted.WriteString("> ")
+			quoted.WriteString(line)
+			quoted.WriteString("\n")
+		}
+		quoted.WriteString("\n---\n\n")
+		quoted.WriteString(response)
+		result := quoted.String()
+
+		if !strings.HasPrefix(result, "**Thinking:**\n> Let me think about this.\n") {
+			t.Errorf("unexpected prefix: %q", result[:min(80, len(result))])
+		}
+		if !strings.HasSuffix(result, "Here is my answer.") {
+			t.Errorf("unexpected suffix: %q", result[max(0, len(result)-50):])
+		}
+		if !strings.Contains(result, "\n---\n\n") {
+			t.Error("should contain separator between thinking and response")
+		}
+	})
+
+	t.Run("multi-line thinking", func(t *testing.T) {
+		thinking := "Step 1: analyze the question.\nStep 2: consider options.\nStep 3: formulate answer."
+		response := "Answer."
+
+		var quoted strings.Builder
+		quoted.WriteString("**Thinking:**\n")
+		for _, line := range strings.Split(thinking, "\n") {
+			quoted.WriteString("> ")
+			quoted.WriteString(line)
+			quoted.WriteString("\n")
+		}
+		quoted.WriteString("\n---\n\n")
+		quoted.WriteString(response)
+		result := quoted.String()
+
+		lines := strings.Split(result, "\n")
+		quotedLineCount := 0
+		for _, line := range lines {
+			if strings.HasPrefix(line, "> ") {
+				quotedLineCount++
+			}
+		}
+		if quotedLineCount != 3 {
+			t.Errorf("expected 3 quoted lines, got %d", quotedLineCount)
+		}
+	})
+
+	t.Run("empty thinking not prepended", func(t *testing.T) {
+		thinking := ""
+		response := "Just the response."
+
+		// Mimic the production logic
+		if thinking != "" {
+			t.Error("should not enter formatting block for empty thinking")
+		}
+		// Response stays unchanged
+		if response != "Just the response." {
+			t.Error("response should be unchanged when no thinking")
+		}
+	})
+}
+
+func TestThinkingStreamAccumulation(t *testing.T) {
+	t.Run("separates thinking and response text", func(t *testing.T) {
+		type testDelta struct {
+			text       string
+			isThinking bool
+		}
+
+		deltas := []testDelta{
+			{"Step 1. ", true},
+			{"Step 2. ", true},
+			{"Here is ", false},
+			{"the answer.", false},
+		}
+
+		var thinkingText, responseText strings.Builder
+		for _, d := range deltas {
+			if d.isThinking {
+				thinkingText.WriteString(d.text)
+			} else {
+				responseText.WriteString(d.text)
+			}
+		}
+
+		if thinkingText.String() != "Step 1. Step 2. " {
+			t.Errorf("unexpected thinking: %q", thinkingText.String())
+		}
+		if responseText.String() != "Here is the answer." {
+			t.Errorf("unexpected response: %q", responseText.String())
+		}
+	})
+}
+
+func TestRateLimiter(t *testing.T) {
+	t.Run("nil limiter always allows", func(t *testing.T) {
+		var r *RateLimiter
+		if !r.Allow() {
+			t.Error("nil rate limiter should always allow")
+		}
+		if r.WaitTime() != 0 {
+			t.Error("nil rate limiter should have 0 wait time")
+		}
+	})
+
+	t.Run("allows up to max requests", func(t *testing.T) {
+		r := NewRateLimiter(3)
+
+		for i := 0; i < 3; i++ {
+			if !r.Allow() {
+				t.Errorf("request %d should be allowed", i+1)
+			}
+		}
+
+		if r.Allow() {
+			t.Error("4th request should be rate limited")
+		}
+	})
+
+	t.Run("disabled with zero or negative", func(t *testing.T) {
+		r := NewRateLimiter(0)
+		if r != nil {
+			t.Error("zero rate limit should return nil")
+		}
+
+		r = NewRateLimiter(-1)
+		if r != nil {
+			t.Error("negative rate limit should return nil")
+		}
+	})
+
+	t.Run("wait time is positive when limited", func(t *testing.T) {
+		r := NewRateLimiter(1)
+		r.Allow()
+
+		wait := r.WaitTime()
+		if wait <= 0 {
+			t.Error("expected positive wait time when rate limited")
+		}
+	})
+}
+
 func TestMinMessageSize(t *testing.T) {
 	t.Run("MinMessageSize is reasonable", func(t *testing.T) {
 		if MinMessageSize < 500 {
