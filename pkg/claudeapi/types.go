@@ -44,6 +44,10 @@ type CreateMessageRequest struct {
 	// This adds cache_control markers to reduce costs on repeated context.
 	// Only enable from the 2nd message to avoid 25% cache write overhead on single questions.
 	EnableCaching bool `json:"-"`
+	// EnableThinking enables extended thinking (chain-of-thought) output.
+	// Requires temperature=1.0 (enforced by the API).
+	EnableThinking      bool `json:"-"`
+	ThinkingBudgetTokens int  `json:"-"`
 }
 
 // CreateMessageResponse represents a response from creating a message.
@@ -87,8 +91,9 @@ type StreamError struct {
 
 // ContentDelta represents incremental content in a streaming response.
 type ContentDelta struct {
-	Type string `json:"type"` // "text_delta"
-	Text string `json:"text"`
+	Type       string `json:"type"` // "text_delta" or "thinking_delta"
+	Text       string `json:"text"`
+	IsThinking bool   `json:"is_thinking,omitempty"`
 }
 
 // APIError represents an error from the Claude API.

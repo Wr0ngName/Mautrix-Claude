@@ -224,6 +224,18 @@ func (c *ClaudeConnector) RegisterCommands(proc *commands.Processor) {
 			RequiresPortal: true,
 		},
 		&commands.FullHandler{
+			Func:    c.cmdThinking,
+			Name:    "thinking",
+			Aliases: []string{"think", "extended-thinking"},
+			Help: commands.HelpMeta{
+				Section:     commands.HelpSectionGeneral,
+				Description: "Toggle extended thinking mode (show Claude's reasoning process)",
+				Args:        "[on|off]",
+			},
+			RequiresLogin:  true,
+			RequiresPortal: true,
+		},
+		&commands.FullHandler{
 			Func: c.cmdRemoveGhost,
 			Name: "remove-ghost",
 			Help: commands.HelpMeta{
@@ -732,6 +744,62 @@ func (c *ClaudeConnector) cmdMention(ce *commands.Event) {
 		ce.Reply("Mention-only mode **enabled**. Claude will only respond when @mentioned.")
 	} else {
 		ce.Reply("Mention-only mode **disabled**. Claude will respond to all messages.")
+	}
+}
+
+// cmdThinking toggles extended thinking mode (API mode only).
+func (c *ClaudeConnector) cmdThinking(ce *commands.Event) {
+	if ce.Portal == nil {
+		ce.Reply("This command must be run in a Claude conversation room.")
+		return
+	}
+
+	meta, ok := ce.Portal.Metadata.(*PortalMetadata)
+	if !ok || meta == nil {
+		ce.Reply("Failed to get room metadata.")
+		return
+	}
+
+	if c.isSidecarLogin(ce) {
+		ce.Reply("Extended thinking is only available in API mode. The Agent SDK (sidecar) does not support this feature.")
+		return
+	}
+
+	if len(ce.Args) == 0 {
+		if meta.ShowThinking {
+			ce.Reply("**Extended thinking:** ON\n\nClaude's reasoning process will be shown as a blockquote before the response.\n\nUse `thinking off` to hide it.")
+		} else {
+			ce.Reply("**Extended thinking:** OFF\n\nClaude's reasoning process is hidden.\n\nUse `thinking on` to show it.")
+		}
+		return
+	}
+
+	arg := strings.ToLower(ce.Args[0])
+	var newValue bool
+	switch arg {
+	case "on", "true", "yes", "1", "enable", "enabled":
+		newValue = true
+	case "off", "false", "no", "0", "disable", "disabled":
+		newValue = false
+	case "toggle":
+		newValue = !meta.ShowThinking
+	default:
+		ce.Reply("Invalid argument. Use `thinking on`, `thinking off`, or `thinking toggle`.")
+		return
+	}
+
+	oldValue := meta.ShowThinking
+	meta.ShowThinking = newValue
+	if err := ce.Portal.Save(ce.Ctx); err != nil {
+		meta.ShowThinking = oldValue
+		ce.Reply("Failed to save setting: %v", err)
+		return
+	}
+
+	if newValue {
+		ce.Reply("Extended thinking **enabled**. Claude's reasoning will be shown before responses.\n\n*Note: temperature is forced to 1.0 when thinking is enabled (API requirement).*")
+	} else {
+		ce.Reply("Extended thinking **disabled**. Claude's reasoning will be hidden.")
 	}
 }
 

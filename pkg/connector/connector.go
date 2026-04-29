@@ -288,6 +288,7 @@ type PortalMetadata struct {
 	SystemPrompt     string   `json:"system_prompt,omitempty"`      // Custom system prompt
 	Temperature      *float64 `json:"temperature,omitempty"`        // Custom temperature
 	MentionOnly      bool     `json:"mention_only,omitempty"`       // Only respond when mentioned
+	ShowThinking     bool     `json:"show_thinking,omitempty"`      // Show extended thinking output
 	SidecarSessionID string   `json:"sidecar_session_id,omitempty"` // Agent SDK session ID for resume
 }
 

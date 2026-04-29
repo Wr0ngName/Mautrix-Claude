@@ -651,6 +651,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	temperature := meta.GetTemperature(c.Connector.Config.GetTemperature())
+	enableThinking := meta.ShowThinking && !isSidecarMode
 
 	systemPrompt := meta.SystemPrompt
 	if systemPrompt == "" {
@@ -720,13 +721,15 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	req := &claudeapi.CreateMessageRequest{
-		Model:         model,
-		Messages:      messagesForAPI,
-		MaxTokens:     c.Connector.Config.GetMaxTokens(),
-		Temperature:   temperature,
-		System:        systemPrompt,
-		Stream:        true, // Use streaming for better UX
-		EnableCaching: enableCaching,
+		Model:                model,
+		Messages:             messagesForAPI,
+		MaxTokens:            c.Connector.Config.GetMaxTokens(),
+		Temperature:          temperature,
+		System:               systemPrompt,
+		Stream:               true,
+		EnableCaching:        enableCaching,
+		EnableThinking:       enableThinking,
+		ThinkingBudgetTokens: 8000,
 	}
 
 	// Send to Claude API (add portal ID context for sidecar session isolation)
@@ -792,6 +795,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	// Collect response
 	var responseText strings.Builder
+	var thinkingText strings.Builder
 	var claudeMessageID string
 	var inputTokens, outputTokens int
 	var streamError error
@@ -809,7 +813,11 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			}
 		case "content_block_delta":
 			if event.Delta != nil && event.Delta.Text != "" {
-				responseText.WriteString(event.Delta.Text)
+				if event.Delta.IsThinking {
+					thinkingText.WriteString(event.Delta.Text)
+				} else {
+					responseText.WriteString(event.Delta.Text)
+				}
 			}
 		case "message_delta":
 			if event.Usage != nil {
@@ -872,6 +880,20 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		errMsg := "received empty response from Claude"
 		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
 		return nil, errors.New(errMsg)
+	}
+
+	// Prepend thinking text as a blockquote when enabled
+	if thinking := thinkingText.String(); thinking != "" && enableThinking {
+		var quoted strings.Builder
+		quoted.WriteString("**Thinking:**\n")
+		for _, line := range strings.Split(thinking, "\n") {
+			quoted.WriteString("> ")
+			quoted.WriteString(line)
+			quoted.WriteString("\n")
+		}
+		quoted.WriteString("\n---\n\n")
+		quoted.WriteString(responseContent)
+		responseContent = quoted.String()
 	}
 
 	// Store sidecar session ID for resume (persisted in bridge DB)

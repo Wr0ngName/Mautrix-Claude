@@ -75,7 +75,10 @@ func (c *Client) CreateMessage(ctx context.Context, req *CreateMessageRequest) (
 		}
 	}
 
-	if req.Temperature >= 0 {
+	if req.EnableThinking && req.ThinkingBudgetTokens > 0 {
+		sdkParams.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(req.ThinkingBudgetTokens))
+		sdkParams.Temperature = anthropic.Float(1.0)
+	} else if req.Temperature >= 0 {
 		sdkParams.Temperature = anthropic.Float(req.Temperature)
 	}
 
@@ -83,6 +86,7 @@ func (c *Client) CreateMessage(ctx context.Context, req *CreateMessageRequest) (
 		Str("model", req.Model).
 		Int("max_tokens", req.MaxTokens).
 		Bool("caching", req.EnableCaching).
+		Bool("thinking", req.EnableThinking).
 		Msg("Sending message to Claude API")
 
 	resp, err := c.sdk.Messages.New(ctx, sdkParams)
@@ -131,7 +135,10 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 		}
 	}
 
-	if req.Temperature >= 0 {
+	if req.EnableThinking && req.ThinkingBudgetTokens > 0 {
+		sdkParams.Thinking = anthropic.ThinkingConfigParamOfEnabled(int64(req.ThinkingBudgetTokens))
+		sdkParams.Temperature = anthropic.Float(1.0)
+	} else if req.Temperature >= 0 {
 		sdkParams.Temperature = anthropic.Float(req.Temperature)
 	}
 
@@ -139,6 +146,7 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 		Str("model", req.Model).
 		Int("max_tokens", req.MaxTokens).
 		Bool("caching", req.EnableCaching).
+		Bool("thinking", req.EnableThinking).
 		Msg("Starting streaming message to Claude API")
 
 	stream := c.sdk.Messages.NewStreaming(ctx, sdkParams)
@@ -446,13 +454,22 @@ func convertSDKStreamEvent(event anthropic.MessageStreamEventUnion) *StreamEvent
 			},
 		}
 	case "content_block_delta":
-		// Defensive check for delta content
 		if event.Delta.Type == "text_delta" && event.Delta.Text != "" {
 			return &StreamEvent{
 				Type: "content_block_delta",
 				Delta: &ContentDelta{
 					Type: "text_delta",
 					Text: event.Delta.Text,
+				},
+			}
+		}
+		if event.Delta.Type == "thinking_delta" && event.Delta.Thinking != "" {
+			return &StreamEvent{
+				Type: "content_block_delta",
+				Delta: &ContentDelta{
+					Type:       "thinking_delta",
+					Text:       event.Delta.Thinking,
+					IsThinking: true,
 				},
 			}
 		}
