@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
@@ -795,6 +796,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	var inputTokens, outputTokens int
 	var streamError error
 	var newSessionID string // Agent SDK session ID from sidecar (for resume)
+	var stopReason string   // Stop reason from message_delta event
 
 	for event := range stream {
 		switch event.Type {
@@ -815,6 +817,9 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 			}
 			if event.SessionID != "" {
 				newSessionID = event.SessionID
+			}
+			if event.StopReason != "" {
+				stopReason = event.StopReason
 			}
 		case "error":
 			c.Connector.Log.Error().Interface("event", event).Msg("Error in stream")
@@ -851,6 +856,14 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 
 	if claudeMessageID == "" {
 		claudeMessageID = fmt.Sprintf("msg_%d", time.Now().UnixNano())
+	}
+
+	// Handle refusal stop reason before checking for empty response
+	if stopReason == "refusal" {
+		errMsg := "Claude declined to respond to this message."
+		c.Connector.Log.Warn().Str("stop_reason", stopReason).Msg("Claude refused to respond")
+		c.sendErrorToRoom(ctx, msg.Portal, errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	// Validate response content
@@ -1232,6 +1245,7 @@ func unclosedCodeFence(text string) (open bool, lang string) {
 }
 
 // findSplitPoint finds a good point to split the text, preferring paragraph, sentence, or word boundaries.
+// The returned position is always aligned to a UTF-8 rune boundary to avoid splitting multi-byte characters.
 func findSplitPoint(text string, maxSize int) int {
 	// Try to find a paragraph break (double newline)
 	for i := maxSize; i > maxSize/2; i-- {
@@ -1264,8 +1278,13 @@ func findSplitPoint(text string, maxSize int) int {
 		}
 	}
 
-	// Last resort: hard cut at maxSize
-	return maxSize
+	// Last resort: hard cut at maxSize, but ensure we don't split in the middle of a
+	// multi-byte UTF-8 character.
+	pos := maxSize
+	for pos > 0 && !utf8.RuneStart(text[pos]) {
+		pos--
+	}
+	return pos
 }
 
 // GetCapabilities returns the capabilities for a specific portal.

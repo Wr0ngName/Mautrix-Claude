@@ -14,10 +14,12 @@ import (
 
 // ModelInfo contains information about a Claude model.
 type ModelInfo struct {
-	ID          string    `json:"id"`
-	DisplayName string    `json:"display_name"`
-	CreatedAt   time.Time `json:"created_at"`
-	Family      string    `json:"family"` // opus, sonnet, haiku
+	ID              string    `json:"id"`
+	DisplayName     string    `json:"display_name"`
+	CreatedAt       time.Time `json:"created_at"`
+	Family          string    `json:"family"`                      // opus, sonnet, haiku
+	MaxInputTokens  int       `json:"max_input_tokens,omitempty"`  // Maximum input context window size
+	MaxOutputTokens int       `json:"max_output_tokens,omitempty"` // Maximum value for max_tokens parameter
 }
 
 // ModelCache caches model information from the API.
@@ -52,10 +54,12 @@ func FetchModels(ctx context.Context, apiKey string) ([]ModelInfo, error) {
 	for pager.Next() {
 		m := pager.Current()
 		info := ModelInfo{
-			ID:          m.ID,
-			DisplayName: m.DisplayName,
-			CreatedAt:   m.CreatedAt,
-			Family:      inferModelFamily(m.ID),
+			ID:              m.ID,
+			DisplayName:     m.DisplayName,
+			CreatedAt:       m.CreatedAt,
+			Family:          inferModelFamily(m.ID),
+			MaxInputTokens:  int(m.MaxInputTokens),
+			MaxOutputTokens: int(m.MaxTokens),
 		}
 		allModels = append(allModels, info)
 	}
@@ -85,10 +89,12 @@ func GetModel(ctx context.Context, apiKey string, modelID string) (*ModelInfo, e
 	}
 
 	return &ModelInfo{
-		ID:          m.ID,
-		DisplayName: m.DisplayName,
-		CreatedAt:   m.CreatedAt,
-		Family:      inferModelFamily(m.ID),
+		ID:              m.ID,
+		DisplayName:     m.DisplayName,
+		CreatedAt:       m.CreatedAt,
+		Family:          inferModelFamily(m.ID),
+		MaxInputTokens:  int(m.MaxInputTokens),
+		MaxOutputTokens: int(m.MaxTokens),
 	}, nil
 }
 
@@ -268,9 +274,16 @@ func GetLatestModelByFamilyFromAPI(ctx context.Context, apiKey string, family st
 }
 
 
-// EstimateMaxTokens returns estimated max tokens for a model based on family.
-// These are approximations - actual limits come from API responses.
+// EstimateMaxTokens returns max tokens for a model.
+// When the model is in the cache with values from the API, those are returned directly.
+// Otherwise, approximate values based on model family are used as a fallback.
 func EstimateMaxTokens(modelID string) (inputTokens, outputTokens int) {
+	if info := globalModelCache.Get(modelID); info != nil {
+		if info.MaxInputTokens > 0 && info.MaxOutputTokens > 0 {
+			return info.MaxInputTokens, info.MaxOutputTokens
+		}
+	}
+	// Fallback to estimates based on model family
 	family := GetModelFamily(modelID)
 	switch family {
 	case "opus":

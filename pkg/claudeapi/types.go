@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/shared"
 )
 
 // Message represents a message in a conversation.
@@ -67,14 +68,15 @@ type Usage struct {
 
 // StreamEvent represents an event in a streaming response.
 type StreamEvent struct {
-	Type      string                 `json:"type"` // "message_start", "content_block_delta", "message_stop", "error", etc.
-	Index     int                    `json:"index,omitempty"`
-	Delta     *ContentDelta          `json:"delta,omitempty"`
-	Message   *CreateMessageResponse `json:"message,omitempty"`
-	Model     string                 `json:"model,omitempty"`      // Actual model used (for sidecar responses)
-	SessionID string                 `json:"session_id,omitempty"` // Agent SDK session ID (for sidecar - stored in bridge DB)
-	Usage     *Usage                 `json:"usage,omitempty"`
-	Error     *StreamError           `json:"error,omitempty"` // Error details for "error" type events
+	Type       string                 `json:"type"` // "message_start", "content_block_delta", "message_stop", "error", etc.
+	Index      int                    `json:"index,omitempty"`
+	Delta      *ContentDelta          `json:"delta,omitempty"`
+	Message    *CreateMessageResponse `json:"message,omitempty"`
+	Model      string                 `json:"model,omitempty"`       // Actual model used (for sidecar responses)
+	SessionID  string                 `json:"session_id,omitempty"`  // Agent SDK session ID (for sidecar - stored in bridge DB)
+	StopReason string                 `json:"stop_reason,omitempty"` // Stop reason from message_delta event (e.g., "end_turn", "refusal")
+	Usage      *Usage                 `json:"usage,omitempty"`
+	Error      *StreamError           `json:"error,omitempty"` // Error details for "error" type events
 }
 
 // StreamError represents an error in a streaming response.
@@ -116,10 +118,10 @@ func IsRateLimitError(err error) bool {
 
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == http.StatusTooManyRequests
+		return apiErr.Type() == shared.ErrorTypeRateLimitError ||
+			apiErr.StatusCode == http.StatusTooManyRequests
 	}
 
-	// Fallback to string matching for other error types
 	errStr := err.Error()
 	return strings.Contains(errStr, "rate_limit") || strings.Contains(errStr, "429")
 }
@@ -132,11 +134,13 @@ func IsAuthError(err error) bool {
 
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == http.StatusUnauthorized ||
+		return apiErr.Type() == shared.ErrorTypeAuthenticationError ||
+			apiErr.Type() == shared.ErrorTypePermissionError ||
+			apiErr.Type() == shared.ErrorTypeBillingError ||
+			apiErr.StatusCode == http.StatusUnauthorized ||
 			apiErr.StatusCode == http.StatusForbidden
 	}
 
-	// Fallback to string matching for other error types
 	errStr := err.Error()
 	return strings.Contains(errStr, "authentication") ||
 		strings.Contains(errStr, "unauthorized") ||
@@ -151,11 +155,13 @@ func IsOverloadedError(err error) bool {
 
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode >= 500 ||
-			apiErr.StatusCode == 529 // Overloaded
+		return apiErr.Type() == shared.ErrorTypeOverloadedError ||
+			apiErr.Type() == shared.ErrorTypeAPIError ||
+			apiErr.Type() == shared.ErrorTypeTimeoutError ||
+			apiErr.StatusCode >= 500 ||
+			apiErr.StatusCode == 529
 	}
 
-	// Fallback to string matching for other error types
 	errStr := err.Error()
 	return strings.Contains(errStr, "overloaded") ||
 		strings.Contains(errStr, "server_error")
@@ -169,10 +175,10 @@ func IsInvalidRequestError(err error) bool {
 
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == http.StatusBadRequest
+		return apiErr.Type() == shared.ErrorTypeInvalidRequestError ||
+			apiErr.StatusCode == http.StatusBadRequest
 	}
 
-	// Fallback to string matching for other error types
 	errStr := err.Error()
 	return strings.Contains(errStr, "invalid_request") ||
 		strings.Contains(errStr, "bad request")

@@ -34,7 +34,7 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 from starlette.responses import Response
 
 # Agent SDK imports
-from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, ResultMessage, TextBlock, SystemMessage
 
 # Configure logging
 logging.basicConfig(
@@ -586,7 +586,7 @@ async def validate_claude_auth() -> bool:
         options = ClaudeAgentOptions(
             allowed_tools=[],  # No tools for validation
             disallowed_tools=list(DANGEROUS_TOOLS),  # SECURITY: block dangerous tools
-            permission_mode="bypassPermissions",
+            permission_mode="dontAsk",
             model=MODEL,
             max_turns=1,  # Single turn only
         )
@@ -594,7 +594,7 @@ async def validate_claude_auth() -> bool:
         # Simple test query - MUST consume all messages to avoid cancel scope errors
         got_result = False
         async for message in query(prompt="Say 'OK' and nothing else.", options=options):
-            if hasattr(message, 'result'):
+            if isinstance(message, ResultMessage):
                 got_result = True
                 # Don't break/return - let the generator complete naturally
 
@@ -693,7 +693,7 @@ async def test_auth(request: TestAuthRequest):
             options = ClaudeAgentOptions(
                 allowed_tools=[],  # No tools for test
                 disallowed_tools=list(DANGEROUS_TOOLS),  # SECURITY: block dangerous tools
-                permission_mode="bypassPermissions",
+                permission_mode="dontAsk",
                 model="haiku",  # Use cheapest/fastest model for test
                 max_turns=1,
             )
@@ -701,7 +701,7 @@ async def test_auth(request: TestAuthRequest):
             # Simple test prompt - consume all messages to avoid cleanup errors
             got_response = False
             async for message in query(prompt="Say 'OK'", options=options):
-                if hasattr(message, 'result'):
+                if isinstance(message, ResultMessage):
                     got_response = True
                     # Don't break - let the generator complete naturally
 
@@ -813,13 +813,13 @@ async def _run_multimodal_query_with_timeout(
                 # Process responses
                 async for message in client.receive_response():
                     # Capture session ID from SystemMessage init
-                    if hasattr(message, 'subtype') and message.subtype == 'init':
+                    if isinstance(message, SystemMessage) and message.subtype == 'init':
                         if hasattr(message, 'data') and 'session_id' in message.data:
                             result.session_id = message.data['session_id']
                             logger.debug(f"Got session_id from Agent SDK: {result.session_id}")
 
                     # Detect compaction events
-                    if hasattr(message, 'subtype') and message.subtype == 'compact':
+                    if isinstance(message, SystemMessage) and message.subtype == 'compact':
                         result.compacted = True
                         logger.info(f"Context compaction occurred for portal {portal_id}")
 
@@ -877,38 +877,28 @@ async def _run_query_with_timeout(
         async with asyncio.timeout(timeout_seconds):
             async for message in query(prompt=prompt, options=options):
                 # Capture session ID on init (returned to bridge for storage)
-                if hasattr(message, 'subtype') and message.subtype == 'init':
+                if isinstance(message, SystemMessage) and message.subtype == 'init':
                     if hasattr(message, 'data') and 'session_id' in message.data:
                         result.session_id = message.data['session_id']
                         logger.debug(f"Got session_id from Agent SDK: {result.session_id}")
 
                 # Detect compaction events via SystemMessage
-                if hasattr(message, 'subtype') and message.subtype == 'compact':
+                if isinstance(message, SystemMessage) and message.subtype == 'compact':
                     result.compacted = True
                     logger.info(f"Context compaction occurred for portal {portal_id}")
 
                 # Capture result from ResultMessage
-                if hasattr(message, 'result') and message.result:
+                if isinstance(message, ResultMessage) and message.result:
                     result.response_text = message.result
 
                 # Capture detailed token usage from ResultMessage.usage dict
-                if hasattr(message, 'usage') and message.usage:
+                if isinstance(message, ResultMessage) and message.usage:
                     usage = message.usage
-                    # Handle both dict and object-style access
                     if isinstance(usage, dict):
                         result.input_tokens += usage.get('input_tokens', 0)
                         result.output_tokens += usage.get('output_tokens', 0)
                         result.cache_creation_tokens += usage.get('cache_creation_input_tokens', 0)
                         result.cache_read_tokens += usage.get('cache_read_input_tokens', 0)
-                    else:
-                        if hasattr(usage, 'input_tokens'):
-                            result.input_tokens += usage.input_tokens
-                        if hasattr(usage, 'output_tokens'):
-                            result.output_tokens += usage.output_tokens
-                        if hasattr(usage, 'cache_creation_input_tokens'):
-                            result.cache_creation_tokens += usage.cache_creation_input_tokens
-                        if hasattr(usage, 'cache_read_input_tokens'):
-                            result.cache_read_tokens += usage.cache_read_input_tokens
 
                     # Update Prometheus metrics
                     TOKENS_USED.labels(type='input').inc(result.input_tokens)
@@ -972,7 +962,7 @@ async def chat(request: ChatRequest):
             options = ClaudeAgentOptions(
                 allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
                 disallowed_tools=list(DANGEROUS_TOOLS),  # CRITICAL: blocks Read, Write, Bash, etc.
-                permission_mode="bypassPermissions",  # No interactive prompts
+                permission_mode="dontAsk",  # No interactive prompts; denies unapproved tools by default
                 model=actual_model,
             )
 
@@ -1165,7 +1155,7 @@ async def chat_stream(request: ChatRequest):
                 options = ClaudeAgentOptions(
                     allowed_tools=ALLOWED_TOOLS if ALLOWED_TOOLS else [],
                     disallowed_tools=list(DANGEROUS_TOOLS),
-                    permission_mode="bypassPermissions",
+                    permission_mode="dontAsk",
                     model=actual_model,
                 )
 
@@ -1190,31 +1180,30 @@ async def chat_stream(request: ChatRequest):
                     async with asyncio.timeout(QUERY_TIMEOUT):
                         async for message in query(prompt=request.message, options=options):
                             # Capture session ID
-                            if hasattr(message, 'subtype') and message.subtype == 'init':
+                            if isinstance(message, SystemMessage) and message.subtype == 'init':
                                 if hasattr(message, 'data') and 'session_id' in message.data:
                                     session.session_id = message.data['session_id']
                                     yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model})}\n\n"
 
                             # Stream assistant messages
-                            if hasattr(message, 'type') and message.type == 'assistant':
-                                if hasattr(message, 'message') and message.message:
-                                    for block in message.message.content:
-                                        if hasattr(block, 'text'):
-                                            yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
+                            if isinstance(message, AssistantMessage):
+                                for block in message.content:
+                                    if isinstance(block, TextBlock):
+                                        yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
 
                             # Stream final result
-                            if hasattr(message, 'result'):
+                            if isinstance(message, ResultMessage):
                                 response_text = message.result
                                 yield f"data: {json.dumps({'type': 'result', 'content': message.result})}\n\n"
 
                             # Capture token usage if available
-                            if hasattr(message, 'usage'):
-                                if hasattr(message.usage, 'input_tokens'):
-                                    request_input_tokens += message.usage.input_tokens
-                                    TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
-                                if hasattr(message.usage, 'output_tokens'):
-                                    request_output_tokens += message.usage.output_tokens
-                                    TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+                            if isinstance(message, ResultMessage) and message.usage:
+                                usage = message.usage
+                                if isinstance(usage, dict):
+                                    request_input_tokens += usage.get('input_tokens', 0)
+                                    request_output_tokens += usage.get('output_tokens', 0)
+                                    TOKENS_USED.labels(type='input').inc(usage.get('input_tokens', 0))
+                                    TOKENS_USED.labels(type='output').inc(usage.get('output_tokens', 0))
                 except (asyncio.TimeoutError, Exception) as e:
                     # Session resume can fail with TimeoutError OR ProcessError (exit code 1)
                     # when the session_id is stale or the CLI doesn't support resume on this arch.
@@ -1236,25 +1225,24 @@ async def chat_stream(request: ChatRequest):
                         try:
                             async with asyncio.timeout(QUERY_TIMEOUT):
                                 async for message in query(prompt=request.message, options=options):
-                                    if hasattr(message, 'subtype') and message.subtype == 'init':
+                                    if isinstance(message, SystemMessage) and message.subtype == 'init':
                                         if hasattr(message, 'data') and 'session_id' in message.data:
                                             session.session_id = message.data['session_id']
                                             yield "data: " + json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model}) + "\n\n"
-                                    if hasattr(message, 'type') and message.type == 'assistant':
-                                        if hasattr(message, 'message') and message.message:
-                                            for block in message.message.content:
-                                                if hasattr(block, 'text'):
-                                                    yield "data: " + json.dumps({'type': 'text', 'content': block.text}) + "\n\n"
-                                    if hasattr(message, 'result'):
+                                    if isinstance(message, AssistantMessage):
+                                        for block in message.content:
+                                            if isinstance(block, TextBlock):
+                                                yield "data: " + json.dumps({'type': 'text', 'content': block.text}) + "\n\n"
+                                    if isinstance(message, ResultMessage):
                                         response_text = message.result
                                         yield "data: " + json.dumps({'type': 'result', 'content': message.result}) + "\n\n"
-                                    if hasattr(message, 'usage'):
-                                        if hasattr(message.usage, 'input_tokens'):
-                                            request_input_tokens += message.usage.input_tokens
-                                            TOKENS_USED.labels(type='input').inc(message.usage.input_tokens)
-                                        if hasattr(message.usage, 'output_tokens'):
-                                            request_output_tokens += message.usage.output_tokens
-                                            TOKENS_USED.labels(type='output').inc(message.usage.output_tokens)
+                                    if isinstance(message, ResultMessage) and message.usage:
+                                        usage = message.usage
+                                        if isinstance(usage, dict):
+                                            request_input_tokens += usage.get('input_tokens', 0)
+                                            request_output_tokens += usage.get('output_tokens', 0)
+                                            TOKENS_USED.labels(type='input').inc(usage.get('input_tokens', 0))
+                                            TOKENS_USED.labels(type='output').inc(usage.get('output_tokens', 0))
                             timed_out = False  # Retry succeeded
                         except (asyncio.TimeoutError, Exception) as retry_e:
                             logger.error("Stream query retry also failed for portal %s: %s", request.portal_id, retry_e)

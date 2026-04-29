@@ -198,8 +198,19 @@ func (c *Client) CreateMessageStream(ctx context.Context, req *CreateMessageRequ
 					cacheReadTokens = streamEvent.Message.Usage.CacheReadTokens
 				}
 			}
-			if streamEvent.Usage != nil && streamEvent.Usage.OutputTokens > 0 {
-				outputTokens = streamEvent.Usage.OutputTokens
+			if streamEvent.Usage != nil {
+				if streamEvent.Usage.OutputTokens > 0 {
+					outputTokens = streamEvent.Usage.OutputTokens
+				}
+				if streamEvent.Usage.InputTokens > 0 {
+					inputTokens = streamEvent.Usage.InputTokens
+				}
+				if streamEvent.Usage.CacheCreationTokens > 0 {
+					cacheCreationTokens = streamEvent.Usage.CacheCreationTokens
+				}
+				if streamEvent.Usage.CacheReadTokens > 0 {
+					cacheReadTokens = streamEvent.Usage.CacheReadTokens
+				}
 			}
 
 			// Non-blocking send to prevent deadlock if receiver abandons channel
@@ -364,15 +375,28 @@ func convertMessagesToSDKWithCache(messages []Message, enableCaching bool) []ant
 }
 
 // convertSDKResponse converts SDK response to our format.
+// Text blocks are included as-is. Thinking blocks are included with their
+// thinking text so callers can surface Claude's reasoning. Redacted thinking
+// blocks are silently skipped (their content is not available). Tool-use and
+// other non-text blocks are skipped.
 func convertSDKResponse(resp *anthropic.Message) *CreateMessageResponse {
 	var content []Content
 	for _, block := range resp.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			content = append(content, Content{
 				Type: "text",
 				Text: block.Text,
 			})
+		case "thinking":
+			if block.Thinking != "" {
+				content = append(content, Content{
+					Type: "text",
+					Text: block.Thinking,
+				})
+			}
 		}
+		// redacted_thinking, tool_use, and other block types are intentionally skipped.
 	}
 
 	return &CreateMessageResponse{
@@ -396,26 +420,30 @@ func convertSDKResponse(resp *anthropic.Message) *CreateMessageResponse {
 func convertSDKStreamEvent(event anthropic.MessageStreamEventUnion) *StreamEvent {
 	switch event.Type {
 	case "message_start":
-		// Defensive nil checks for message_start event
-		if event.Message.ID != "" {
-			usage := &Usage{}
-			if event.Message.Usage.InputTokens > 0 {
-				usage.InputTokens = int(event.Message.Usage.InputTokens)
-			}
-			if event.Message.Usage.CacheCreationInputTokens > 0 {
-				usage.CacheCreationTokens = int(event.Message.Usage.CacheCreationInputTokens)
-			}
-			if event.Message.Usage.CacheReadInputTokens > 0 {
-				usage.CacheReadTokens = int(event.Message.Usage.CacheReadInputTokens)
-			}
-			return &StreamEvent{
-				Type: "message_start",
-				Message: &CreateMessageResponse{
-					ID:    event.Message.ID,
-					Model: string(event.Message.Model),
-					Usage: usage,
-				},
-			}
+		// Always process usage data regardless of whether the message ID is present.
+		// Use a fallback ID if the API returns an empty one to avoid silently dropping
+		// usage information.
+		usage := &Usage{}
+		if event.Message.Usage.InputTokens > 0 {
+			usage.InputTokens = int(event.Message.Usage.InputTokens)
+		}
+		if event.Message.Usage.CacheCreationInputTokens > 0 {
+			usage.CacheCreationTokens = int(event.Message.Usage.CacheCreationInputTokens)
+		}
+		if event.Message.Usage.CacheReadInputTokens > 0 {
+			usage.CacheReadTokens = int(event.Message.Usage.CacheReadInputTokens)
+		}
+		id := event.Message.ID
+		if id == "" {
+			id = fmt.Sprintf("msg_%d", time.Now().UnixNano())
+		}
+		return &StreamEvent{
+			Type: "message_start",
+			Message: &CreateMessageResponse{
+				ID:    id,
+				Model: string(event.Message.Model),
+				Usage: usage,
+			},
 		}
 	case "content_block_delta":
 		// Defensive check for delta content
@@ -433,15 +461,33 @@ func convertSDKStreamEvent(event anthropic.MessageStreamEventUnion) *StreamEvent
 		if event.Usage.OutputTokens > 0 {
 			usage.OutputTokens = int(event.Usage.OutputTokens)
 		}
+		if event.Usage.InputTokens > 0 {
+			usage.InputTokens = int(event.Usage.InputTokens)
+		}
+		if event.Usage.CacheCreationInputTokens > 0 {
+			usage.CacheCreationTokens = int(event.Usage.CacheCreationInputTokens)
+		}
+		if event.Usage.CacheReadInputTokens > 0 {
+			usage.CacheReadTokens = int(event.Usage.CacheReadInputTokens)
+		}
+		stopReason := string(event.Delta.StopReason)
 		return &StreamEvent{
-			Type:  "message_delta",
-			Usage: usage,
+			Type:       "message_delta",
+			Usage:      usage,
+			StopReason: stopReason,
 		}
 	case "message_stop":
 		return &StreamEvent{
 			Type: "message_stop",
 		}
+	case "content_block_start", "content_block_stop":
+		// These are protocol bookkeeping events with no data we need to forward.
+		// Return nil to suppress trace-level log noise from the caller.
+		return nil
 	case "error":
+		// Defensive: the SDK's SSE decoder normally intercepts API error events
+		// and surfaces them via stream.Err(). This case handles any error events
+		// that might slip through if SDK behaviour changes.
 		return &StreamEvent{
 			Type: "error",
 			Error: &StreamError{

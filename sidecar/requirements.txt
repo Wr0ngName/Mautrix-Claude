@@ -1,6 +1,7 @@
 # Claude Agent SDK Sidecar dependencies
-claude-agent-sdk>=0.1.0
+claude-agent-sdk==0.1.71
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
 prometheus-client>=0.19.0
+sniffio>=1.0.0
