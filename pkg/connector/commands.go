@@ -747,7 +747,7 @@ func (c *ClaudeConnector) cmdMention(ce *commands.Event) {
 	}
 }
 
-// cmdThinking toggles extended thinking mode (API mode only).
+// cmdThinking toggles extended thinking mode.
 func (c *ClaudeConnector) cmdThinking(ce *commands.Event) {
 	if ce.Portal == nil {
 		ce.Reply("This command must be run in a Claude conversation room.")
@@ -757,11 +757,6 @@ func (c *ClaudeConnector) cmdThinking(ce *commands.Event) {
 	meta, ok := ce.Portal.Metadata.(*PortalMetadata)
 	if !ok || meta == nil {
 		ce.Reply("Failed to get room metadata.")
-		return
-	}
-
-	if c.isSidecarLogin(ce) {
-		ce.Reply("Extended thinking is only available in API mode. The Agent SDK (sidecar) does not support this feature.")
 		return
 	}
 
@@ -797,7 +792,7 @@ func (c *ClaudeConnector) cmdThinking(ce *commands.Event) {
 	}
 
 	if newValue {
-		ce.Reply("Extended thinking **enabled**. Claude's reasoning will be shown before responses.\n\n*Note: temperature is forced to 1.0 when thinking is enabled (API requirement).*")
+		ce.Reply("Extended thinking **enabled**. Claude's reasoning will be shown before responses.\n\n*Note: In API mode, temperature is forced to 1.0 when thinking is enabled.*")
 	} else {
 		ce.Reply("Extended thinking **disabled**. Claude's reasoning will be hidden.")
 	}

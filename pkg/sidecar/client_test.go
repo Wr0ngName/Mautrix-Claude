@@ -257,7 +257,7 @@ func TestChat(t *testing.T) {
 			client := NewClient(server.URL, 30*time.Second, zerolog.Nop())
 			ctx := context.Background()
 
-			resp, err := client.Chat(ctx, tt.portalID, "", "", tt.message, "", tt.systemPrompt, tt.model)
+			resp, err := client.Chat(ctx, tt.portalID, "", "", tt.message, "", tt.systemPrompt, tt.model, false, 0)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Chat() error = %v, wantErr %v", err, tt.wantErr)
@@ -291,7 +291,7 @@ func TestChatContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	_, err := client.Chat(ctx, "portal123", "", "", "message", "", nil, nil)
+	_, err := client.Chat(ctx, "portal123", "", "", "message", "", nil, nil, false, 0)
 	if err == nil {
 		t.Error("Expected error due to context cancellation")
 	}
@@ -659,7 +659,7 @@ func TestChatEmptyMessage(t *testing.T) {
 	ctx := context.Background()
 
 	// Server should reject empty message
-	_, err := client.Chat(ctx, "portal123", "", "", "", "", nil, nil)
+	_, err := client.Chat(ctx, "portal123", "", "", "", "", nil, nil, false, 0)
 	if err == nil {
 		t.Error("Expected error for empty message")
 	}
@@ -705,6 +705,6 @@ func BenchmarkChat(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = client.Chat(ctx, "portal123", "", "", "Hello", "", nil, nil)
+		_, _ = client.Chat(ctx, "portal123", "", "", "Hello", "", nil, nil, false, 0)
 	}
 }

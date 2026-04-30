@@ -34,7 +34,7 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 from starlette.responses import Response
 
 # Agent SDK imports
-from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, ResultMessage, TextBlock, SystemMessage
+from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, ResultMessage, TextBlock, ThinkingBlock, SystemMessage
 
 # Configure logging
 logging.basicConfig(
@@ -194,6 +194,8 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     session_id: Optional[str] = None  # Agent SDK session ID for resume (stored in bridge DB)
     stream: bool = False
+    enable_thinking: bool = False  # Enable extended thinking output
+    thinking_budget_tokens: int = 8000  # Token budget for thinking
 
     def has_images(self) -> bool:
         """Check if this request contains images."""
@@ -245,6 +247,7 @@ class ChatResponse(BaseModel):
     tokens_used: Optional[int] = None
     usage: Optional[UsageInfo] = None  # Detailed usage breakdown
     compacted: bool = False  # Whether compaction occurred during this request
+    thinking_text: Optional[str] = None  # Extended thinking output
 
 
 class SessionManager:
@@ -735,6 +738,7 @@ async def test_auth(request: TestAuthRequest):
 class QueryResult:
     """Result of a query with detailed usage information."""
     response_text: str = ""
+    thinking_text: str = ""
     session_id: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
@@ -836,11 +840,15 @@ async def _run_multimodal_query_with_timeout(
                                 result.cache_creation_tokens += usage.get('cache_creation_input_tokens', 0)
                                 result.cache_read_tokens += usage.get('cache_read_input_tokens', 0)
 
-                    # Also capture text from AssistantMessage content blocks
+                    # Capture thinking and text from AssistantMessage content blocks
                     if isinstance(message, AssistantMessage):
                         for block in message.content:
-                            if isinstance(block, TextBlock):
-                                # Accumulate text (result may come in parts)
+                            if isinstance(block, ThinkingBlock) and block.thinking:
+                                if result.thinking_text:
+                                    result.thinking_text += block.thinking
+                                else:
+                                    result.thinking_text = block.thinking
+                            elif isinstance(block, TextBlock):
                                 if not result.response_text:
                                     result.response_text = block.text
                                 else:
@@ -886,6 +894,15 @@ async def _run_query_with_timeout(
                 if isinstance(message, SystemMessage) and message.subtype == 'compact':
                     result.compacted = True
                     logger.info(f"Context compaction occurred for portal {portal_id}")
+
+                # Capture thinking and text from AssistantMessage content blocks
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, ThinkingBlock) and block.thinking:
+                            if result.thinking_text:
+                                result.thinking_text += block.thinking
+                            else:
+                                result.thinking_text = block.thinking
 
                 # Capture result from ResultMessage
                 if isinstance(message, ResultMessage) and message.result:
@@ -965,6 +982,14 @@ async def chat(request: ChatRequest):
                 permission_mode="dontAsk",  # No interactive prompts; denies unapproved tools by default
                 model=actual_model,
             )
+
+            # Enable extended thinking if requested
+            if request.enable_thinking:
+                options.thinking = {
+                    "type": "enabled",
+                    "budget_tokens": request.thinking_budget_tokens,
+                    "display": "summarized",
+                }
 
             # Resume session if session_id provided by bridge (stored in bridge DB)
             session_id_to_use = request.session_id
@@ -1080,6 +1105,7 @@ async def chat(request: ChatRequest):
                 tokens_used=total_tokens if total_tokens > 0 else None,
                 usage=usage_info,
                 compacted=query_result.compacted,
+                thinking_text=query_result.thinking_text or None,
             )
 
         except HTTPException:
@@ -1159,6 +1185,14 @@ async def chat_stream(request: ChatRequest):
                     model=actual_model,
                 )
 
+                # Enable extended thinking if requested
+                if request.enable_thinking:
+                    options.thinking = {
+                        "type": "enabled",
+                        "budget_tokens": request.thinking_budget_tokens,
+                        "display": "summarized",
+                    }
+
                 # Use session_id from request (bridge DB) if provided, otherwise fall back to local session
                 session_id_to_use = request.session_id
                 if session_id_to_use:
@@ -1188,7 +1222,9 @@ async def chat_stream(request: ChatRequest):
                             # Stream assistant messages
                             if isinstance(message, AssistantMessage):
                                 for block in message.content:
-                                    if isinstance(block, TextBlock):
+                                    if isinstance(block, ThinkingBlock) and block.thinking:
+                                        yield f"data: {json.dumps({'type': 'thinking', 'content': block.thinking})}\n\n"
+                                    elif isinstance(block, TextBlock):
                                         yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
 
                             # Stream final result
@@ -1231,7 +1267,9 @@ async def chat_stream(request: ChatRequest):
                                             yield "data: " + json.dumps({'type': 'session', 'session_id': session.session_id, 'model': actual_model}) + "\n\n"
                                     if isinstance(message, AssistantMessage):
                                         for block in message.content:
-                                            if isinstance(block, TextBlock):
+                                            if isinstance(block, ThinkingBlock) and block.thinking:
+                                                yield "data: " + json.dumps({'type': 'thinking', 'content': block.thinking}) + "\n\n"
+                                            elif isinstance(block, TextBlock):
                                                 yield "data: " + json.dumps({'type': 'text', 'content': block.text}) + "\n\n"
                                     if isinstance(message, ResultMessage):
                                         response_text = message.result

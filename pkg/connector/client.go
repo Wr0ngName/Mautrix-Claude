@@ -651,7 +651,7 @@ func (c *ClaudeClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}
 
 	temperature := meta.GetTemperature(c.Connector.Config.GetTemperature())
-	enableThinking := meta.ShowThinking && !isSidecarMode
+	enableThinking := meta.ShowThinking
 
 	systemPrompt := meta.SystemPrompt
 	if systemPrompt == "" {

@@ -128,7 +128,7 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 		}
 
 		// Use ChatWithContent to support images
-		resp, err := m.client.ChatWithContent(ctx, portalID, userID, credentialsJSON, messageText, messageContent, sessionID, systemPrompt, model)
+		resp, err := m.client.ChatWithContent(ctx, portalID, userID, credentialsJSON, messageText, messageContent, sessionID, systemPrompt, model, req.EnableThinking, req.ThinkingBudgetTokens)
 		if err != nil {
 			m.metrics.FailedRequests.Add(1)
 			// Check if it was a context cancellation
@@ -156,6 +156,20 @@ func (m *MessageClient) CreateMessageStream(ctx context.Context, req *claudeapi.
 		actualModel := resp.Model
 		if actualModel == "" {
 			actualModel = req.Model // Fallback to request model if response is empty
+		}
+
+		// Send thinking content if available
+		if resp.ThinkingText != nil && *resp.ThinkingText != "" {
+			if !sendEvent(claudeapi.StreamEvent{
+				Type: "content_block_delta",
+				Delta: &claudeapi.ContentDelta{
+					Type:       "thinking_delta",
+					Text:       *resp.ThinkingText,
+					IsThinking: true,
+				},
+			}) {
+				return // Context cancelled
+			}
 		}
 
 		// Send content as a single block
@@ -245,7 +259,7 @@ func (m *MessageClient) CreateMessage(ctx context.Context, req *claudeapi.Create
 	}
 
 	// Use ChatWithContent to support images
-	resp, err := m.client.ChatWithContent(ctx, portalID, userID, credentialsJSON, messageText, messageContent, sessionID, systemPrompt, model)
+	resp, err := m.client.ChatWithContent(ctx, portalID, userID, credentialsJSON, messageText, messageContent, sessionID, systemPrompt, model, req.EnableThinking, req.ThinkingBudgetTokens)
 	if err != nil {
 		m.metrics.FailedRequests.Add(1)
 		return nil, err

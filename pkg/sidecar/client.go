@@ -95,17 +95,20 @@ type ChatRequest struct {
 	Content         []ContentBlock `json:"content,omitempty"`          // Structured content with images (multimodal)
 	SystemPrompt    *string        `json:"system_prompt,omitempty"`
 	Model           *string        `json:"model,omitempty"`
-	SessionID       string         `json:"session_id,omitempty"` // Agent SDK session ID for resume (from bridge DB)
-	Stream          bool           `json:"stream"`
+	SessionID            string         `json:"session_id,omitempty"`             // Agent SDK session ID for resume (from bridge DB)
+	Stream               bool           `json:"stream"`
+	EnableThinking       bool           `json:"enable_thinking,omitempty"`        // Enable extended thinking output
+	ThinkingBudgetTokens int            `json:"thinking_budget_tokens,omitempty"` // Token budget for thinking
 }
 
 // ChatResponse is the response body from the chat endpoint.
 type ChatResponse struct {
-	PortalID   string `json:"portal_id"`
-	SessionID  string `json:"session_id"`
-	Response   string `json:"response"`
-	Model      string `json:"model"` // Actual model used for this request
-	TokensUsed *int   `json:"tokens_used,omitempty"`
+	PortalID     string  `json:"portal_id"`
+	SessionID    string  `json:"session_id"`
+	Response     string  `json:"response"`
+	Model        string  `json:"model"`                    // Actual model used for this request
+	TokensUsed   *int    `json:"tokens_used,omitempty"`
+	ThinkingText *string `json:"thinking_text,omitempty"` // Extended thinking output
 }
 
 // SessionStats contains statistics about a session.
@@ -390,29 +393,31 @@ func (c *Client) OAuthComplete(ctx context.Context, userID, state, code string) 
 // Chat sends a message to Claude and returns the response.
 // Includes retry logic with exponential backoff and circuit breaker protection.
 // sessionID is the Agent SDK session ID for resuming conversations (stored in bridge DB).
-func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, message, sessionID string, systemPrompt, model *string) (*ChatResponse, error) {
-	return c.ChatWithContent(ctx, portalID, userID, credentialsJSON, message, nil, sessionID, systemPrompt, model)
+func (c *Client) Chat(ctx context.Context, portalID, userID, credentialsJSON, message, sessionID string, systemPrompt, model *string, enableThinking bool, thinkingBudgetTokens int) (*ChatResponse, error) {
+	return c.ChatWithContent(ctx, portalID, userID, credentialsJSON, message, nil, sessionID, systemPrompt, model, enableThinking, thinkingBudgetTokens)
 }
 
 // ChatWithContent sends a message to Claude with optional structured content (for images).
 // If content is nil or empty, falls back to text-only message mode.
 // sessionID is the Agent SDK session ID for resuming conversations (stored in bridge DB).
-func (c *Client) ChatWithContent(ctx context.Context, portalID, userID, credentialsJSON, message string, content []ContentBlock, sessionID string, systemPrompt, model *string) (*ChatResponse, error) {
+func (c *Client) ChatWithContent(ctx context.Context, portalID, userID, credentialsJSON, message string, content []ContentBlock, sessionID string, systemPrompt, model *string, enableThinking bool, thinkingBudgetTokens int) (*ChatResponse, error) {
 	// Check circuit breaker
 	if !c.checkCircuit() {
 		return nil, fmt.Errorf("circuit breaker open: sidecar temporarily unavailable")
 	}
 
 	reqBody := ChatRequest{
-		PortalID:        portalID,
-		UserID:          userID,
-		CredentialsJSON: credentialsJSON,
-		Message:         message,
-		Content:         content, // May be nil for text-only
-		SystemPrompt:    systemPrompt,
-		Model:           model,
-		SessionID:       sessionID,
-		Stream:          false,
+		PortalID:             portalID,
+		UserID:               userID,
+		CredentialsJSON:      credentialsJSON,
+		Message:              message,
+		Content:              content, // May be nil for text-only
+		SystemPrompt:         systemPrompt,
+		Model:                model,
+		SessionID:            sessionID,
+		Stream:               false,
+		EnableThinking:       enableThinking,
+		ThinkingBudgetTokens: thinkingBudgetTokens,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
