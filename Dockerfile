@@ -9,7 +9,7 @@
 
 # ============== Stage 1: Build Go binary ==============
 # Use Debian-based image to match runtime libc (glibc)
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates build-essential libsqlite3-dev \
@@ -33,7 +33,7 @@ RUN CGO_ENABLED=1 go build -tags "goolm" -o /usr/bin/mautrix-claude \
     ./cmd/mautrix-claude
 
 # ============== Stage 2: Get Node.js binary ==============
-FROM --platform=$TARGETPLATFORM node:20-slim AS node
+FROM node:20-slim AS node
 
 # ============== Stage 3: Final image ==============
 # Use minimal Debian base with Python
