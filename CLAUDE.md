@@ -2,22 +2,20 @@
 
 ## Build
 
-Local development (no olm C headers required):
+Local development:
 ```bash
-CGO_ENABLED=1 go build -tags "noolm,nocrypto" -o mautrix-claude ./cmd/mautrix-claude
+CGO_ENABLED=1 go build -tags "goolm" -o mautrix-claude ./cmd/mautrix-claude
 ```
 
-Docker (has olm headers installed):
+Docker:
 ```bash
 docker compose build
 ```
 
-The Dockerfile uses `-tags "goolm"` because the builder stage installs `libsqlite3-dev` and the Go OLM implementation. Local builds use `noolm,nocrypto` to skip the C olm dependency.
-
 ## Test
 
 ```bash
-CGO_ENABLED=1 go test -tags "noolm,nocrypto" ./...
+CGO_ENABLED=1 go test -tags "goolm" ./...
 ```
 
 ## Project structure
