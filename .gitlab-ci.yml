@@ -19,14 +19,30 @@ docker:
       TOML
     - docker buildx rm multiarch 2>/dev/null || true
     - docker buildx create --use --name multiarch --config /tmp/buildkitd.toml
-    - docker buildx build
-        --platform linux/amd64,linux/arm64
-        --build-arg COMMIT_HASH=${CI_COMMIT_SHA}
-        --build-arg BUILD_TIME=$(date -Iseconds)
-        --build-arg VERSION=${CI_COMMIT_TAG:-0.1.0}
-        -t ${REGISTRY}/${IMAGE_NAME}:latest
-        -t ${REGISTRY}/${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}
-        --push
+    - |
+      TAGS=""
+      if [[ "${CI_COMMIT_TAG}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        MAJOR="${BASH_REMATCH[1]}"
+        MINOR="${BASH_REMATCH[2]}"
+        PATCH="${BASH_REMATCH[3]}"
+        VERSION="${MAJOR}.${MINOR}.${PATCH}"
+        TAGS="-t ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+        TAGS="${TAGS} -t ${REGISTRY}/${IMAGE_NAME}:${MAJOR}.${MINOR}"
+        TAGS="${TAGS} -t ${REGISTRY}/${IMAGE_NAME}:${MAJOR}"
+        TAGS="${TAGS} -t ${REGISTRY}/${IMAGE_NAME}:latest"
+        TAGS="${TAGS} -t ${REGISTRY}/${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
+      else
+        VERSION="0.1.0-dev.${CI_COMMIT_SHORT_SHA}"
+        TAGS="-t ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+        TAGS="${TAGS} -t ${REGISTRY}/${IMAGE_NAME}:latest"
+      fi
+      docker buildx build \
+        --platform linux/amd64,linux/arm64 \
+        --build-arg COMMIT_HASH=${CI_COMMIT_SHA} \
+        --build-arg BUILD_TIME=$(date -Iseconds) \
+        --build-arg VERSION=${VERSION} \
+        ${TAGS} \
+        --push \
         .
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -51,11 +67,18 @@ dockerhub:
     - docker buildx rm multiarch 2>/dev/null || true
     - docker buildx create --use --name multiarch --config /tmp/buildkitd.toml
     - echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-    - VERSION="${CI_COMMIT_TAG#v}"
-    - DOCKERHUB_IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}"
-    - docker buildx imagetools create
-        -t ${DOCKERHUB_IMAGE}:${VERSION}
-        -t ${DOCKERHUB_IMAGE}:latest
+    - |
+      MAJOR="${CI_COMMIT_TAG%%.*}"
+      MAJOR="${MAJOR#v}"
+      MINOR="${CI_COMMIT_TAG#v}"
+      MINOR="${MINOR%.*}"
+      VERSION="${CI_COMMIT_TAG#v}"
+      DOCKERHUB_IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}"
+      docker buildx imagetools create \
+        -t ${DOCKERHUB_IMAGE}:${VERSION} \
+        -t ${DOCKERHUB_IMAGE}:${MINOR} \
+        -t ${DOCKERHUB_IMAGE}:${MAJOR} \
+        -t ${DOCKERHUB_IMAGE}:latest \
         ${REGISTRY}/${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}
     - docker logout
   rules:
