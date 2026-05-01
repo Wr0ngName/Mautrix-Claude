@@ -56,6 +56,7 @@ dockerhub:
   stage: publish
   tags:
     - shell
+  retry: 2
   needs:
     - docker
   script:
@@ -68,18 +69,15 @@ dockerhub:
     - docker buildx rm multiarch 2>/dev/null || true
     - docker buildx create --use --name multiarch --config /tmp/buildkitd.toml
     - echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
-    - |
-      MAJOR="${CI_COMMIT_TAG%%.*}"
-      MAJOR="${MAJOR#v}"
-      MINOR="${CI_COMMIT_TAG#v}"
-      MINOR="${MINOR%.*}"
-      VERSION="${CI_COMMIT_TAG#v}"
-      DOCKERHUB_IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}"
-      docker buildx imagetools create \
-        -t ${DOCKERHUB_IMAGE}:${VERSION} \
-        -t ${DOCKERHUB_IMAGE}:${MINOR} \
-        -t ${DOCKERHUB_IMAGE}:${MAJOR} \
-        -t ${DOCKERHUB_IMAGE}:latest \
+    - VERSION="${CI_COMMIT_TAG#v}"
+    - MAJOR="${VERSION%%.*}"
+    - MINOR="${VERSION%.*}"
+    - DOCKERHUB_IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}"
+    - docker buildx imagetools create
+        -t ${DOCKERHUB_IMAGE}:${VERSION}
+        -t ${DOCKERHUB_IMAGE}:${MINOR}
+        -t ${DOCKERHUB_IMAGE}:${MAJOR}
+        -t ${DOCKERHUB_IMAGE}:latest
         ${REGISTRY}/${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}
     - docker logout
   rules:
