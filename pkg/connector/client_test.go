@@ -120,6 +120,7 @@ func (m *mockMatrixAPI) SetAvatarURL(ctx context.Context, avatarURL id.ContentUR
 	return nil
 }
 func (m *mockMatrixAPI) SetExtraProfileMeta(ctx context.Context, data any) error { return nil }
+func (m *mockMatrixAPI) SetProfile(ctx context.Context, data any) error              { return nil }
 func (m *mockMatrixAPI) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (id.RoomID, error) {
 	return "", nil
 }
