@@ -582,6 +582,12 @@ def _run_setup_token_and_get_url(config_dir: str) -> tuple[str, int, any]:
 _env_lock = asyncio.Lock()
 
 
+def _is_auth_error(error_str: str) -> bool:
+    """Check if an error indicates the CLI is not logged in."""
+    lower = error_str.lower()
+    return "not logged in" in lower or "please run /login" in lower or "not authenticated" in lower
+
+
 async def validate_claude_auth() -> bool:
     """Validate that Claude Code is authenticated by making a test query."""
     try:
@@ -1117,10 +1123,14 @@ async def chat(request: ChatRequest):
             REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
             raise HTTPException(status_code=504, detail=f"Request timed out after {QUERY_TIMEOUT}s")
         except Exception as e:
-            # Log full error but don't expose details to client (security)
+            error_str = str(e)
             logger.error(f"Error processing chat request for portal {request.portal_id}: {e}", exc_info=True)
             REQUESTS_TOTAL.labels(endpoint='/v1/chat', status='error').inc()
-            raise HTTPException(status_code=500, detail="Internal error processing request")
+            if _is_auth_error(error_str):
+                global _auth_validated
+                _auth_validated = False
+                raise HTTPException(status_code=401, detail="Claude CLI not logged in - re-authentication required")
+            raise HTTPException(status_code=500, detail=f"CLI error: {error_str}")
         finally:
             # Restore original environment variables
             if original_config_dir is not None:
@@ -1309,9 +1319,14 @@ async def chat_stream(request: ChatRequest):
                 yield "data: {\"type\": \"done\"}\n\n"
 
             except Exception as e:
-                # Log full error but don't expose details to client (security)
+                error_str = str(e)
                 logger.error(f"Error in stream for portal {request.portal_id}: {e}", exc_info=True)
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Internal error processing request'})}\n\n"
+                if _is_auth_error(error_str):
+                    global _auth_validated
+                    _auth_validated = False
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Claude CLI not logged in - re-authentication required'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'CLI error: {error_str}'})}\n\n"
             finally:
                 # Restore original environment variables
                 if original_config_dir is not None:

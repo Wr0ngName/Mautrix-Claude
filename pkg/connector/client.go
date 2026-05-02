@@ -966,7 +966,10 @@ func (c *ClaudeClient) formatUserFriendlyError(err error) error {
 
 	errStr := strings.ToLower(err.Error())
 
-	// Check for sidecar auth errors (credentials expired/invalid)
+	// Check for sidecar auth errors (CLI not logged in, credentials expired/invalid)
+	if strings.Contains(errStr, "not logged in") || strings.Contains(errStr, "re-authentication required") {
+		return fmt.Errorf("Claude is not logged in. Please re-authenticate using the login command")
+	}
 	if strings.Contains(errStr, "credentials") && (strings.Contains(errStr, "expired") || strings.Contains(errStr, "re-login")) {
 		return fmt.Errorf("your Claude credentials have expired. Please use the 'logout' command, then log in again with fresh credentials")
 	}
