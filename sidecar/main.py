@@ -589,23 +589,25 @@ def _is_auth_error(error_str: str) -> bool:
 
 
 async def validate_claude_auth() -> bool:
-    """Validate that Claude Code is authenticated by making a test query."""
+    """Validate that Claude Code is authenticated by making a test query.
+
+    Treats quota/rate limit errors as auth OK (credentials work, just no quota).
+    Only treats "not logged in" as auth failure.
+    """
     try:
         logger.info("Validating Claude Code authentication...")
         options = ClaudeAgentOptions(
-            allowed_tools=[],  # No tools for validation
-            disallowed_tools=list(DANGEROUS_TOOLS),  # SECURITY: block dangerous tools
+            allowed_tools=[],
+            disallowed_tools=list(DANGEROUS_TOOLS),
             permission_mode="dontAsk",
             model=MODEL,
-            max_turns=1,  # Single turn only
+            max_turns=1,
         )
 
-        # Simple test query - MUST consume all messages to avoid cancel scope errors
         got_result = False
         async for message in query(prompt="Say 'OK' and nothing else.", options=options):
             if isinstance(message, ResultMessage):
                 got_result = True
-                # Don't break/return - let the generator complete naturally
 
         if got_result:
             logger.info("Claude Code authentication validated successfully")
@@ -614,8 +616,13 @@ async def validate_claude_auth() -> bool:
         logger.warning("Auth validation: no result received")
         return False
     except Exception as e:
-        logger.error(f"Claude Code authentication failed: {e}")
-        return False
+        error_str = str(e).lower()
+        if _is_auth_error(error_str):
+            logger.error(f"Claude Code not logged in: {e}")
+            return False
+        # Quota exceeded, rate limited, or other non-auth errors mean credentials are valid
+        logger.warning(f"Auth validation query failed (non-auth error, treating as authenticated): {e}")
+        return True
 
 
 @app.get("/health")
