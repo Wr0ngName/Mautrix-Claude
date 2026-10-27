@@ -6,18 +6,47 @@ variables:
   REGISTRY: dev.wn:5000
   IMAGE_NAME: mautrix-claude
 
-docker:
-  stage: docker
+# Per-job buildx builder.
+#
+# The shell runner executes every project's jobs as the same user, so the buildx
+# "current builder" (`docker buildx create --use`) and fixed paths such as
+# /tmp/buildkitd.toml are shared by all concurrent pipelines on the host. Another
+# project's job could switch the current builder mid-pipeline and our
+# `imagetools create` would then talk to a builder without the dev.wn:5000 insecure
+# registry config ("http: server gave HTTP response to HTTPS client").
+#
+# Each job therefore gets its own builder and config file, named after CI_JOB_ID.
+# BUILDX_BUILDER selects the builder for every buildx command in the job without
+# touching the shared current-builder state, so `--use` is intentionally absent.
+#
+# Jobs may set BUILDKIT_IMAGE to pin the BuildKit image; left empty, buildx uses
+# its default image.
+.buildx:
   tags:
     - shell
-  script:
+  variables:
+    BUILDX_BUILDER: ${IMAGE_NAME}-${CI_JOB_ID}
+    BUILDKITD_CONFIG: /tmp/buildkitd-${CI_JOB_ID}.toml
+    BUILDKIT_IMAGE: ""
+  before_script:
     - |
-      cat > /tmp/buildkitd.toml << 'TOML'
+      cat > "${BUILDKITD_CONFIG}" << 'TOML'
       [registry."dev.wn:5000"]
         http = true
         insecure = true
       TOML
-    - docker buildx rm ${IMAGE_NAME} 2>/dev/null || true
+    - docker buildx create
+        --name "${BUILDX_BUILDER}"
+        --config "${BUILDKITD_CONFIG}"
+        ${BUILDKIT_IMAGE:+--driver-opt image=${BUILDKIT_IMAGE}}
+  after_script:
+    - docker buildx rm "${BUILDX_BUILDER}" || true
+    - rm -f "${BUILDKITD_CONFIG}"
+
+docker:
+  extends: .buildx
+  stage: docker
+  variables:
     # PINNED BUILDKIT — do not bump blindly, and do not drop without reading this.
     #
     # runc's shared-tmpfs maskPaths optimisation (opencontainers/runc#5275, shipped in
@@ -42,7 +71,8 @@ docker:
     # REVIEW THIS PIN when either of these happens:
     #   - the dev.wn runner host kernel is upgraded -> drop the pin, go back to default
     #   - BuildKit ships a release bundling runc >= v1.5.1 -> pin that release instead
-    - docker buildx create --use --name ${IMAGE_NAME} --config /tmp/buildkitd.toml --driver-opt image=moby/buildkit:v0.30.0
+    BUILDKIT_IMAGE: moby/buildkit:v0.30.0
+  script:
     - |
       if [[ "${CI_COMMIT_TAG}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
         VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
@@ -77,24 +107,15 @@ docker:
     - when: manual
 
 dockerhub:
+  extends: .buildx
   stage: publish
-  tags:
-    - shell
   retry: 2
   needs:
     - docker
+  # No BuildKit pin needed here: this job only runs `imagetools create`, which
+  # manipulates manifests server-side and never starts a build container, so the
+  # runc maskPaths issue documented in the `docker` job cannot trigger.
   script:
-    - |
-      cat > /tmp/buildkitd.toml << 'TOML'
-      [registry."dev.wn:5000"]
-        http = true
-        insecure = true
-      TOML
-    - docker buildx rm ${IMAGE_NAME} 2>/dev/null || true
-    # No BuildKit pin needed here: this job only runs `imagetools create`, which
-    # manipulates manifests server-side and never starts a build container, so the
-    # runc maskPaths issue documented in the `docker` job cannot trigger.
-    - docker buildx create --use --name ${IMAGE_NAME} --config /tmp/buildkitd.toml
     - echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
     - VERSION="${CI_COMMIT_TAG#v}"
     - MAJOR="${VERSION%%.*}"
